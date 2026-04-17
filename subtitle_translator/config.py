@@ -50,29 +50,74 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw)
+
+
+def _resolve_phase1_model() -> str:
+    return (
+        os.getenv("SRT_PHASE1_MODEL")
+        or os.getenv("SRT_OPENAI_MODEL")
+        or "gpt-4.1-mini"
+    ).strip() or "gpt-4.1-mini"
+
+
+def _resolve_context_window_flag() -> bool:
+    if os.getenv("SRT_USE_CONTEXT_WINDOW") is not None:
+        return _env_flag("SRT_USE_CONTEXT_WINDOW", True)
+    return _env_flag("SRT_USE_PREVIOUS_CONTEXT", True)
+
+
 @dataclass
 class RuntimeConfig:
     openai_api_key: str
+    phase1_model: str
+    repair_model: str
     translation_context: str
     translation_style: str
-    use_previous_translation_context: bool
+    use_context_window: bool
+    repair_enabled: bool
     glossary_log_path: Optional[Path]
     glossary_max_terms: int
     request_timeout: int
+    block_min_cues: int
+    block_max_cues: int
+    block_max_duration_ms: int
+    block_max_source_chars: int
+    block_max_gap_ms: int
+    max_chars_per_line: int
+    max_lines_per_cue: int
+    max_cps: float
 
 
 def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfig:
     env_glossary_path = os.getenv("SRT_GLOSSARY_LOG_PATH", "translation_artifacts/glossary.jsonl").strip()
     resolved_glossary = glossary_log_path if glossary_log_path is not None else env_glossary_path
     glossary_path = Path(resolved_glossary).expanduser() if resolved_glossary else None
+    block_min_cues = max(1, _env_int("SRT_BLOCK_MIN_CUES", 2))
+    block_max_cues = max(block_min_cues, _env_int("SRT_BLOCK_MAX_CUES", 4))
     return RuntimeConfig(
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+        phase1_model=_resolve_phase1_model(),
+        repair_model=(os.getenv("SRT_REPAIR_MODEL", "gpt-4o").strip() or "gpt-4o"),
         translation_context=os.getenv("SRT_TRANSLATION_CONTEXT", "").strip(),
         translation_style=os.getenv("SRT_TRANSLATION_STYLE", "").strip(),
-        use_previous_translation_context=_env_flag("SRT_USE_PREVIOUS_CONTEXT", True),
+        use_context_window=_resolve_context_window_flag(),
+        repair_enabled=_env_flag("SRT_ENABLE_REPAIR", True),
         glossary_log_path=glossary_path,
         glossary_max_terms=max(1, _env_int("SRT_GLOSSARY_MAX_TERMS", 12)),
         request_timeout=max(1, _env_int("SRT_REQUEST_TIMEOUT", 120)),
+        block_min_cues=block_min_cues,
+        block_max_cues=block_max_cues,
+        block_max_duration_ms=max(1000, _env_int("SRT_BLOCK_MAX_DURATION_MS", 6500)),
+        block_max_source_chars=max(40, _env_int("SRT_BLOCK_MAX_SOURCE_CHARS", 160)),
+        block_max_gap_ms=max(0, _env_int("SRT_BLOCK_MAX_GAP_MS", 800)),
+        max_chars_per_line=max(8, _env_int("SRT_MAX_CHARS_PER_LINE", 24)),
+        max_lines_per_cue=max(1, _env_int("SRT_MAX_LINES_PER_CUE", 2)),
+        max_cps=max(1.0, _env_float("SRT_MAX_CPS", 18.0)),
     )
 
 

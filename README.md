@@ -32,12 +32,22 @@ python3 -m pip install requests
 ## Environment Variables
 
 - `OPENAI_API_KEY`: required API key.
+- `SRT_OPENAI_MODEL`: default model when `--model` is omitted. Defaults to `gpt-4.1-mini`.
 - `SRT_TRANSLATION_CONTEXT`: optional domain/context hint for the translator.
 - `SRT_TRANSLATION_STYLE`: optional tone/style hint for the translator.
 - `SRT_USE_PREVIOUS_CONTEXT`: `true` by default. Reuses the last translated sentence as context.
 - `SRT_GLOSSARY_LOG_PATH`: glossary JSONL log path. Defaults to `translation_artifacts/glossary.jsonl`.
 - `SRT_GLOSSARY_MAX_TERMS`: number of relevant glossary entries injected per request. Defaults to `12`.
 - `SRT_REQUEST_TIMEOUT`: request timeout in seconds. Defaults to `120`.
+
+## CS231n Preset
+
+The previously hard-coded prompt values were:
+
+- `SRT_TRANSLATION_CONTEXT=These subtitles are the Stanford CS231n lecture on computer vision and deep learning.`
+- `SRT_TRANSLATION_STYLE=Translate in a spoken, explanatory lecture style (like a professor talking to students). Use polite Korean sentence endings consistently (e.g. 습니다체; '~입니다', '~할 수 있습니다'), but allow occasional softer variations such as '~하는 거죠', '~라는 겁니다' to sound natural in lecture context.`
+
+`.env.example` now includes those values directly so you can keep the old behavior by copying it as-is.
 
 ## Single File Usage
 

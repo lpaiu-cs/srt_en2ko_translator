@@ -6,20 +6,11 @@ import os
 import sys
 
 from subtitle_translator import (
-    BaseTranslator,
-    BatchTranslationResult,
-    Cue,
-    GlossaryEntry,
-    OpenAIChatTranslator,
-    RuntimeConfig,
-    SentenceGroup,
-    TranslationRequest,
     build_translator,
     create_glossary_store,
     load_runtime_config,
     positive_int,
     read_srt,
-    translate_batch_groups,
     translate_srt,
     write_srt,
 )
@@ -30,9 +21,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", help="Path to input .srt (English)")
     parser.add_argument("-o", "--output", default=None, help="Path to output .srt (Korean)")
     parser.add_argument("--provider", choices=["openai"], default="openai", help="LLM provider")
-    parser.add_argument("--model", default="gpt-4.1-mini", help="LLM model name")
-    parser.add_argument("--batch-size", type=positive_int, default=32, help="Sentence batch size per API call")
-    parser.add_argument("--repeat-fill", action="store_true", help="Repeat last fragment to fill empty slots")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Phase1 model name (default: .env SRT_PHASE1_MODEL/SRT_OPENAI_MODEL or gpt-4.1-mini)",
+    )
+    parser.add_argument(
+        "--repair-model",
+        default=None,
+        help="Phase2 repair model name (default: .env SRT_REPAIR_MODEL or gpt-4o)",
+    )
+    parser.add_argument(
+        "--block-max-cues",
+        "--batch-size",
+        dest="block_max_cues",
+        type=positive_int,
+        default=None,
+        help="Maximum cues per translation block (legacy alias: --batch-size)",
+    )
     parser.add_argument("--openai-base-url", default="https://api.openai.com/v1", help="Override OpenAI base URL")
     parser.add_argument(
         "--glossary-log-path",
@@ -40,9 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override glossary JSONL log path (default comes from .env or translation_artifacts/glossary.jsonl)",
     )
     parser.add_argument(
+        "--disable-context-window",
         "--disable-history-context",
+        dest="disable_context_window",
         action="store_true",
-        help="Do not feed the previous translated sentence back into later requests",
+        help="Do not provide surrounding source context to the model",
     )
     return parser
 
@@ -53,17 +61,21 @@ def main() -> int:
         raise ValueError("Unsupported provider")
 
     config = load_runtime_config(glossary_log_path=args.glossary_log_path)
-    translator = build_translator(config=config, model=args.model, base_url=args.openai_base_url)
+    model = args.model or config.phase1_model
+    repair_model = args.repair_model or config.repair_model
+    if args.disable_context_window:
+        config.use_context_window = False
+    if args.block_max_cues is not None:
+        config.block_max_cues = max(config.block_min_cues, args.block_max_cues)
+    translator = build_translator(config=config, model=model, repair_model=repair_model, base_url=args.openai_base_url)
     glossary_store = create_glossary_store(config=config, glossary_log_path=args.glossary_log_path)
 
     cues = read_srt(args.input)
     out_cues = translate_srt(
         cues,
         translator=translator,
-        batch_size=args.batch_size,
-        repeat_fill=args.repeat_fill,
+        config=config,
         glossary_store=glossary_store,
-        use_previous_context=(config.use_previous_translation_context and not args.disable_history_context),
     )
 
     output_path = args.output or os.path.splitext(args.input)[0] + ".ko.srt"

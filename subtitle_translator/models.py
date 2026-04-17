@@ -26,13 +26,39 @@ class GlossaryEntry:
 
 
 @dataclass
+class EmittedCue:
+    cue_index: int
+    text: str
+
+
+@dataclass
+class TranslationBlock:
+    cues: List[Cue]
+    previous_source_sentences: List[str] = field(default_factory=list)
+    next_source_sentences: List[str] = field(default_factory=list)
+
+
+@dataclass
 class TranslationRequest:
-    sentences: List[str]
-    previous_translation: str = ""
+    block: TranslationBlock
     glossary_terms: List[GlossaryEntry] = field(default_factory=list)
 
 
 @dataclass
-class BatchTranslationResult:
-    translations: List[str]
-    glossary_updates: List[GlossaryEntry] = field(default_factory=list)
+class PhaseTranslationResult:
+    emitted_cues: List[EmittedCue]
+    risk_flags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RepairRequest:
+    block: TranslationBlock
+    phase1_result: PhaseTranslationResult
+    glossary_terms: List[GlossaryEntry] = field(default_factory=list)
+    failure_reasons: List[str] = field(default_factory=list)
+
+
+@dataclass
+class QualityGateResult:
+    passed: bool
+    reasons: List[str] = field(default_factory=list)

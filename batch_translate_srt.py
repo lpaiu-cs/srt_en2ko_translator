@@ -31,15 +31,13 @@ def find_files(root: Path, pattern: str, recursive: bool) -> List[Path]:
     return sorted(root.glob(pattern))
 
 
-def process_file(path: Path, translator, glossary_store, batch_size: int, repeat_fill: bool, use_previous_context: bool) -> Path:
+def process_file(path: Path, translator, glossary_store, config) -> Path:
     cues = read_srt(str(path))
     out_cues = translate_srt(
         cues,
         translator=translator,
-        batch_size=batch_size,
-        repeat_fill=repeat_fill,
+        config=config,
         glossary_store=glossary_store,
-        use_previous_context=use_previous_context,
     )
     out_path = path.with_name(path.stem + ".ko.srt")
     write_srt(out_cues, str(out_path))
@@ -51,9 +49,24 @@ def main():
     ap.add_argument("folder", help="Folder containing .srt files")
     ap.add_argument("--pattern", default="*.srt", help="Glob pattern for input files (default: *.srt)")
     ap.add_argument("--recursive", action="store_true", help="Recurse into subfolders")
-    ap.add_argument("--model", default="gpt-4.1-mini", help="LLM model name (default: gpt-4.1-mini)")
-    ap.add_argument("--batch-size", type=positive_int, default=32, help="Sentence batch size per API call (default: 32)")
-    ap.add_argument("--repeat-fill", action="store_true", help="Repeat last fragment to fill empty slots")
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="Phase1 model name (default: .env SRT_PHASE1_MODEL/SRT_OPENAI_MODEL or gpt-4.1-mini)",
+    )
+    ap.add_argument(
+        "--repair-model",
+        default=None,
+        help="Phase2 repair model name (default: .env SRT_REPAIR_MODEL or gpt-4o)",
+    )
+    ap.add_argument(
+        "--block-max-cues",
+        "--batch-size",
+        dest="block_max_cues",
+        type=positive_int,
+        default=None,
+        help="Maximum cues per translation block (legacy alias: --batch-size)",
+    )
     ap.add_argument("--openai-base-url", default="https://api.openai.com/v1", help="Override OpenAI base URL")
     ap.add_argument("--skip-existing", action="store_true", help="Skip if output .ko.srt already exists")
     ap.add_argument("--retries", type=positive_int, default=3, help="Retries per file on failure (default: 3)")
@@ -63,9 +76,11 @@ def main():
         help="Override glossary JSONL log path (shared across the batch run)",
     )
     ap.add_argument(
+        "--disable-context-window",
         "--disable-history-context",
+        dest="disable_context_window",
         action="store_true",
-        help="Do not feed the previous translated sentence back into later requests",
+        help="Do not provide surrounding source context to the model",
     )
     args = ap.parse_args()
 
@@ -80,9 +95,14 @@ def main():
         return
 
     config = load_runtime_config(glossary_log_path=args.glossary_log_path)
-    translator = build_translator(config=config, model=args.model, base_url=args.openai_base_url)
+    model = args.model or config.phase1_model
+    repair_model = args.repair_model or config.repair_model
+    if args.disable_context_window:
+        config.use_context_window = False
+    if args.block_max_cues is not None:
+        config.block_max_cues = max(config.block_min_cues, args.block_max_cues)
+    translator = build_translator(config=config, model=model, repair_model=repair_model, base_url=args.openai_base_url)
     glossary_store = create_glossary_store(config=config, glossary_log_path=args.glossary_log_path)
-    use_previous_context = config.use_previous_translation_context and not args.disable_history_context
 
     total = len(files)
     print(f"Found {total} file(s). Starting...\n")
@@ -107,9 +127,7 @@ def main():
                     f,
                     translator=translator,
                     glossary_store=glossary_store,
-                    batch_size=args.batch_size,
-                    repeat_fill=args.repeat_fill,
-                    use_previous_context=use_previous_context,
+                    config=config,
                 )
                 print(f"[{i}/{total}] DONE  : {f.name} → {out_path.name}")
                 done += 1
