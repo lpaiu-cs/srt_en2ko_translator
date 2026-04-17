@@ -6,6 +6,8 @@ import os
 import sys
 
 from subtitle_translator import (
+    TranslationMetrics,
+    append_metrics_log,
     build_translator,
     create_glossary_store,
     load_runtime_config,
@@ -69,6 +71,7 @@ def main() -> int:
         config.block_max_cues = max(config.block_min_cues, args.block_max_cues)
     translator = build_translator(config=config, model=model, repair_model=repair_model, base_url=args.openai_base_url)
     glossary_store = create_glossary_store(config=config, glossary_log_path=args.glossary_log_path)
+    metrics = TranslationMetrics()
 
     cues = read_srt(args.input)
     out_cues = translate_srt(
@@ -76,10 +79,20 @@ def main() -> int:
         translator=translator,
         config=config,
         glossary_store=glossary_store,
+        metrics=metrics,
     )
 
     output_path = args.output or os.path.splitext(args.input)[0] + ".ko.srt"
     write_srt(out_cues, output_path)
+    append_metrics_log(
+        config.metrics_log_path,
+        metrics,
+        input_path=args.input,
+        output_path=output_path,
+        phase1_model=model,
+        repair_model=repair_model,
+    )
+    print(f"Metrics: {metrics.summary()}", file=sys.stderr)
     print(f"Wrote: {output_path}")
     return 0
 

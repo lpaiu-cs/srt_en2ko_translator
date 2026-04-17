@@ -23,6 +23,7 @@ class GlossaryEntry:
     source: str
     target: str
     note: str = ""
+    mode: str = "soft"
 
 
 @dataclass
@@ -36,6 +37,9 @@ class TranslationBlock:
     cues: List[Cue]
     previous_source_sentences: List[str] = field(default_factory=list)
     next_source_sentences: List[str] = field(default_factory=list)
+    low_confidence: bool = False
+    lint_reasons: List[str] = field(default_factory=list)
+    lint_actions: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -60,5 +64,12 @@ class RepairRequest:
 
 @dataclass
 class QualityGateResult:
-    passed: bool
+    repair_needed: bool
+    repair_reasons: List[str] = field(default_factory=list)
+    warning_reasons: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SchemaValidationResult:
+    valid: bool
     reasons: List[str] = field(default_factory=list)

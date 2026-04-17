@@ -81,8 +81,12 @@ class RuntimeConfig:
     use_context_window: bool
     repair_enabled: bool
     glossary_log_path: Optional[Path]
+    metrics_log_path: Optional[Path]
     glossary_max_terms: int
     request_timeout: int
+    phase1_max_retries: int
+    phase2_max_repairs: int
+    max_split_depth: int
     block_min_cues: int
     block_max_cues: int
     block_max_duration_ms: int
@@ -91,12 +95,15 @@ class RuntimeConfig:
     max_chars_per_line: int
     max_lines_per_cue: int
     max_cps: float
+    allowed_english_terms: list[str]
 
 
 def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfig:
     env_glossary_path = os.getenv("SRT_GLOSSARY_LOG_PATH", "translation_artifacts/glossary.jsonl").strip()
     resolved_glossary = glossary_log_path if glossary_log_path is not None else env_glossary_path
     glossary_path = Path(resolved_glossary).expanduser() if resolved_glossary else None
+    env_metrics_path = os.getenv("SRT_METRICS_LOG_PATH", "translation_artifacts/run_metrics.jsonl").strip()
+    metrics_path = Path(env_metrics_path).expanduser() if env_metrics_path else None
     block_min_cues = max(1, _env_int("SRT_BLOCK_MIN_CUES", 2))
     block_max_cues = max(block_min_cues, _env_int("SRT_BLOCK_MAX_CUES", 4))
     return RuntimeConfig(
@@ -108,8 +115,12 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
         use_context_window=_resolve_context_window_flag(),
         repair_enabled=_env_flag("SRT_ENABLE_REPAIR", True),
         glossary_log_path=glossary_path,
+        metrics_log_path=metrics_path,
         glossary_max_terms=max(1, _env_int("SRT_GLOSSARY_MAX_TERMS", 12)),
         request_timeout=max(1, _env_int("SRT_REQUEST_TIMEOUT", 120)),
+        phase1_max_retries=max(1, _env_int("SRT_PHASE1_MAX_RETRIES", 2)),
+        phase2_max_repairs=max(1, _env_int("SRT_PHASE2_MAX_REPAIRS", 1)),
+        max_split_depth=max(0, _env_int("SRT_MAX_SPLIT_DEPTH", 4)),
         block_min_cues=block_min_cues,
         block_max_cues=block_max_cues,
         block_max_duration_ms=max(1000, _env_int("SRT_BLOCK_MAX_DURATION_MS", 6500)),
@@ -118,6 +129,12 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
         max_chars_per_line=max(8, _env_int("SRT_MAX_CHARS_PER_LINE", 24)),
         max_lines_per_cue=max(1, _env_int("SRT_MAX_LINES_PER_CUE", 2)),
         max_cps=max(1.0, _env_float("SRT_MAX_CPS", 18.0)),
+        allowed_english_terms=[
+            term.strip().casefold()
+            for term in os.getenv("SRT_ALLOWED_ENGLISH_TERMS", "PyTorch,NumPy,ResNet,ImageNet,Stanford,CS231n")
+            .split(",")
+            if term.strip()
+        ],
     )
 
 

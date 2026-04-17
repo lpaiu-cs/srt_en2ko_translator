@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import List
 
 from .models import Cue, SentenceGroup
@@ -21,6 +22,67 @@ ABBREVIATIONS = {
     "u.s",
     "u.k",
 }
+
+CONNECTOR_PREFIXES = (
+    "and",
+    "but",
+    "because",
+    "so",
+    "or",
+    "then",
+    "which",
+    "that",
+    "who",
+    "when",
+    "while",
+    "if",
+    "though",
+    "although",
+    "where",
+    "as",
+)
+
+FILLER_PREFIXES = (
+    "well",
+    "you know",
+    "i mean",
+    "okay",
+    "ok",
+    "all right",
+    "right",
+)
+
+INCOMPLETE_SUFFIXES = (
+    "and",
+    "or",
+    "but",
+    "so",
+    "because",
+    "that",
+    "which",
+    "who",
+    "when",
+    "while",
+    "if",
+    "to",
+    "of",
+    "for",
+    "with",
+    "in",
+    "on",
+    "at",
+    "by",
+    "from",
+    "as",
+    "into",
+    "about",
+    "like",
+    "such as",
+    "kind of",
+    "sort of",
+)
+
+_WORD_RE = re.compile(r"[A-Za-z']+")
 
 
 def _next_non_space(text: str, start: int) -> str:
@@ -54,8 +116,61 @@ def _sentence_boundary_positions(text: str) -> List[int]:
         cut = idx + 1
         while cut < len(text) and text[cut].isspace():
             cut += 1
+        if _should_hold_boundary(text, cut):
+            continue
         boundaries.append(cut)
     return boundaries
+
+
+def _normalize_ascii(text: str) -> str:
+    return normalize_text(text).casefold()
+
+
+def _has_unclosed_delimiter(segment: str) -> bool:
+    if segment.count("(") > segment.count(")"):
+        return True
+    if segment.count("[") > segment.count("]"):
+        return True
+    if segment.count("{") > segment.count("}"):
+        return True
+    quote_count = segment.count('"') + segment.count("“") + segment.count("”")
+    return quote_count % 2 == 1
+
+
+def _starts_with_prefix(fragment: str, prefixes: tuple[str, ...]) -> bool:
+    lowered = _normalize_ascii(fragment)
+    return any(lowered.startswith(prefix + " ") or lowered == prefix for prefix in prefixes)
+
+
+def _ends_with_incomplete_suffix(segment: str) -> bool:
+    lowered = _normalize_ascii(segment).rstrip(" .!?,'\"")
+    return any(lowered.endswith(" " + suffix) or lowered == suffix for suffix in INCOMPLETE_SUFFIXES)
+
+
+def _looks_filler_sentence(segment: str) -> bool:
+    lowered = _normalize_ascii(segment).rstrip(" .!?,'\"")
+    if _starts_with_prefix(lowered, FILLER_PREFIXES):
+        words = _WORD_RE.findall(lowered)
+        return len(words) <= 4
+    return False
+
+
+def _should_hold_boundary(text: str, cut: int) -> bool:
+    left = text[:cut].strip()
+    right = text[cut:].strip()
+    if not left or not right:
+        return False
+    if _has_unclosed_delimiter(left):
+        return True
+    if _ends_with_incomplete_suffix(left):
+        return True
+    if _starts_with_prefix(right, CONNECTOR_PREFIXES):
+        return True
+    if _starts_with_prefix(right, FILLER_PREFIXES):
+        return True
+    if _looks_filler_sentence(left):
+        return True
+    return False
 
 
 def group_cues_into_sentences(cues: List[Cue]) -> List[SentenceGroup]:

@@ -40,13 +40,16 @@ class GlossaryStore:
         source = normalize_text(str(payload.get("source", "")))
         target = normalize_text(str(payload.get("target", "")))
         note = normalize_text(str(payload.get("note", "")))
+        mode = normalize_text(str(payload.get("mode", "soft"))).lower() or "soft"
         if not source or not target:
             return None
         if len(source) < 2 or len(source) > 80 or len(target) > 120:
             return None
         if source.isdigit():
             return None
-        return GlossaryEntry(source=source, target=target, note=note)
+        if mode not in {"hard", "soft"}:
+            mode = "soft"
+        return GlossaryEntry(source=source, target=target, note=note, mode=mode)
 
     def relevant_terms(self, texts: Iterable[str]) -> List[GlossaryEntry]:
         haystack = " ".join(texts)
@@ -75,6 +78,7 @@ class GlossaryStore:
                     "source": update.source,
                     "target": update.target,
                     "note": update.note,
+                    "mode": update.mode,
                 }
             )
             if not entry:
@@ -86,12 +90,13 @@ class GlossaryStore:
             self.entries[key] = entry
             appended.append(
                 {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "source": entry.source,
-                    "target": entry.target,
-                    "note": entry.note,
-                }
-            )
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "source": entry.source,
+                        "target": entry.target,
+                        "note": entry.note,
+                        "mode": entry.mode,
+                    }
+                )
         if not appended:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)

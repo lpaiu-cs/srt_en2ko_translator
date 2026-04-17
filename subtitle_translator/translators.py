@@ -8,7 +8,17 @@ import requests
 
 from .config import RuntimeConfig
 from .models import EmittedCue, PhaseTranslationResult, RepairRequest, TranslationRequest
+from .splitting import ts_to_ms
 from .text import compact_spaces, normalize_text
+
+RISK_FLAG_ENUM = [
+    "front_sparse",
+    "tail_heavy",
+    "glossary_uncertain",
+    "context_uncertain",
+    "formula_uncertain",
+    "name_uncertain",
+]
 
 
 def _extract_message_text(content: Any) -> str:
@@ -51,7 +61,7 @@ def _build_phase_schema(cue_count: int, schema_name: str) -> dict:
                     },
                     "risk_flags": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {"type": "string", "enum": RISK_FLAG_ENUM},
                     },
                 },
                 "required": ["emitted_cues", "risk_flags"],
@@ -71,6 +81,13 @@ def build_phase1_system_prompt(config: RuntimeConfig) -> str:
         "Preserve numbers, formulas, brackets, and glossary terms.",
         "Produce natural Korean while staying aligned to subtitle timing anchors.",
         "If there is a risk of poor alignment or readability, report short risk_flags.",
+        "The input may include boundary lint flags and lint actions.",
+        "If lint_flags include dependent_start or comparison_midstart, treat the block as a mid-thought fragment and do not invent a missing lead-in.",
+        "If lint_flags include dependent_end, do not over-close the thought with added content that is not present.",
+        "If lint_flags include qa_fragment, keep acknowledgements short and do not expand or duplicate them.",
+        "If lint_flags include numeric_orphan, preserve numbers, ratios, symbols, and abbreviations exactly and do not add surrounding explanation.",
+        "If lint_actions include carry_context_only, keep the current cue boundary and translate as a context-dependent fragment instead of forcing full local completeness.",
+        f"Allowed risk_flags are: {', '.join(RISK_FLAG_ENUM)}.",
     ]
     if config.translation_context:
         parts.append(f"Context: {compact_spaces(config.translation_context)}")
@@ -88,6 +105,11 @@ def build_repair_system_prompt(config: RuntimeConfig) -> str:
         "Preserve numbers, formulas, brackets, and glossary terms.",
         "Prefer not to leave the first cue empty.",
         "Improve natural Korean and line readability while respecting timing anchors.",
+        "Fix only the listed failures.",
+        "Leave unaffected cues unchanged whenever possible.",
+        "Change as little as possible.",
+        "Boundary lint flags may indicate that the source block is fragmentary; do not invent missing context while repairing readability.",
+        f"Allowed risk_flags are: {', '.join(RISK_FLAG_ENUM)}.",
         "Return only repaired emitted cues and optional risk flags.",
     ]
     if config.translation_context:
@@ -128,37 +150,51 @@ class OpenAIChatTranslator(BaseTranslator):
 
     def _payload_for_phase1(self, request: TranslationRequest) -> dict:
         block = request.block
+        cues = block.cues
         return {
             "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": block.lint_reasons,
+                "lint_actions": block.lint_actions,
+            },
             "source_cues": [
                 {
                     "cue_index": cue.index,
                     "start": cue.start,
                     "end": cue.end,
                     "text": cue.text,
+                    "duration_ms": max(ts_to_ms(cue.end) - ts_to_ms(cue.start), 1),
+                    "gap_after_ms": max(ts_to_ms(cues[idx + 1].start) - ts_to_ms(cue.end), 0) if idx + 1 < len(cues) else 0,
                 }
-                for cue in block.cues
+                for idx, cue in enumerate(cues)
             ],
-            "previous_source_sentences": block.previous_source_sentences,
-            "next_source_sentences": block.next_source_sentences,
+            "left_context": block.previous_source_sentences,
+            "right_context": block.next_source_sentences,
             "glossary_terms": [
-                {"source": term.source, "target": term.target, "note": term.note}
+                {"source": term.source, "target": term.target, "note": term.note, "mode": term.mode}
                 for term in request.glossary_terms
             ],
         }
 
     def _payload_for_repair(self, request: RepairRequest) -> dict:
         block = request.block
+        cues = block.cues
         return {
             "task": "subtitle_phase2_repair",
+            "boundary_lint": {
+                "lint_flags": block.lint_reasons,
+                "lint_actions": block.lint_actions,
+            },
             "source_cues": [
                 {
                     "cue_index": cue.index,
                     "start": cue.start,
                     "end": cue.end,
                     "text": cue.text,
+                    "duration_ms": max(ts_to_ms(cue.end) - ts_to_ms(cue.start), 1),
+                    "gap_after_ms": max(ts_to_ms(cues[idx + 1].start) - ts_to_ms(cue.end), 0) if idx + 1 < len(cues) else 0,
                 }
-                for cue in block.cues
+                for idx, cue in enumerate(cues)
             ],
             "phase1_emitted_cues": [
                 {"cue_index": cue.cue_index, "text": cue.text}
@@ -166,7 +202,7 @@ class OpenAIChatTranslator(BaseTranslator):
             ],
             "failure_reasons": request.failure_reasons,
             "glossary_terms": [
-                {"source": term.source, "target": term.target, "note": term.note}
+                {"source": term.source, "target": term.target, "note": term.note, "mode": term.mode}
                 for term in request.glossary_terms
             ],
         }

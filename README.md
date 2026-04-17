@@ -1,22 +1,39 @@
 # Translator
 
-English SRT to Korean subtitle translator with cue-preserving output, batch processing, prompt configuration via `.env`, rolling context, and a reusable glossary log.
+English SRT to Korean subtitle translator with cue-preserving output, structured model responses, bounded repair, and batch processing.
 
 ## Features
 
 - Preserves original cue timing and cue indices.
-- Groups adjacent cues into sentence-level translation units before re-splitting them.
-- Reuses the previous translated sentence as lightweight discourse context.
-- Maintains a JSONL glossary log for recurring terminology across files.
-- Avoids splitting inside numeric separators such as `1,000` and `3.14` when redistributing text back into cues.
+- Builds small dynamic translation blocks instead of translating the whole sentence at once.
+- Separates `context window`, `translation unit`, and `emission unit`.
+- Uses Phase1 structured output for exact cue-count preservation.
+- Applies deterministic quality gates before and after line wrapping.
+- Tries local re-wrap strategies before escalating post-wrap failures to repair or smaller-block fallback.
+- Sends only failed blocks to a bounded Phase2 repair model.
+- Caps retry, repair, and recursive split depth to avoid oscillating fallback behavior.
+- Supports reusable glossary logs with `hard` and `soft` term modes.
+- Writes per-file JSONL metrics for tuning prompt, block size, and repair policy.
 - Supports single-file and folder-based batch translation.
+
+## Pipeline
+
+1. Build a translation block of 2-4 cues using punctuation, gap, duration, and source-length limits.
+2. Send the block to Phase1 and require structured output with `emitted_cues` and `risk_flags`.
+3. Validate schema and cue structure. If structure fails, retry Phase1 and then fall back to smaller blocks.
+4. Run a pre-wrap gate for alignment, glossary, anchor, English residual, and front/tail concentration checks.
+5. Apply line wrapping, then try local re-wrap strategies if the first wrap fails post-wrap checks.
+6. Run a post-wrap gate for line overflow, CPS, and bad line break checks.
+7. If needed, send only that block to Phase2 repair with a bounded rewrite prompt.
+8. If the block still fails, split it into smaller blocks instead of using proportional redistribution.
+9. Stop recursive fallback when split depth is exhausted or the same failure signature repeats.
 
 ## Repository Layout
 
-- `srt_en2ko_translator.py`: single-file CLI entrypoint for one SRT.
+- `srt_en2ko_translator.py`: single-file CLI entrypoint.
 - `batch_translate_srt.py`: folder-based batch runner.
-- `subtitle_translator/`: refactored core package.
-- `translation_artifacts/`: generated glossary logs and other local artifacts.
+- `subtitle_translator/`: core package.
+- `translation_artifacts/`: local glossary logs and other generated artifacts.
 
 ## Setup
 
@@ -32,54 +49,67 @@ python3 -m pip install requests
 ## Environment Variables
 
 - `OPENAI_API_KEY`: required API key.
-- `SRT_OPENAI_MODEL`: default model when `--model` is omitted. Defaults to `gpt-4.1-mini`.
-- `SRT_TRANSLATION_CONTEXT`: optional domain/context hint for the translator.
-- `SRT_TRANSLATION_STYLE`: optional tone/style hint for the translator.
-- `SRT_USE_PREVIOUS_CONTEXT`: `true` by default. Reuses the last translated sentence as context.
-- `SRT_GLOSSARY_LOG_PATH`: glossary JSONL log path. Defaults to `translation_artifacts/glossary.jsonl`.
-- `SRT_GLOSSARY_MAX_TERMS`: number of relevant glossary entries injected per request. Defaults to `12`.
-- `SRT_REQUEST_TIMEOUT`: request timeout in seconds. Defaults to `120`.
+- `SRT_PHASE1_MODEL`: default Phase1 model. Defaults to `gpt-4.1-mini`.
+- `SRT_OPENAI_MODEL`: backward-compatible alias for `SRT_PHASE1_MODEL`.
+- `SRT_REPAIR_MODEL`: default Phase2 repair model. Defaults to `gpt-4o`.
+- `SRT_TRANSLATION_CONTEXT`: optional domain/context hint.
+- `SRT_TRANSLATION_STYLE`: optional tone/style hint.
+- `SRT_USE_CONTEXT_WINDOW`: whether to provide left/right source context.
+- `SRT_ENABLE_REPAIR`: enables bounded Phase2 repair.
+- `SRT_PHASE1_MAX_RETRIES`, `SRT_PHASE2_MAX_REPAIRS`, `SRT_MAX_SPLIT_DEPTH`: retry and recursion guardrails.
+- `SRT_GLOSSARY_LOG_PATH`: glossary JSONL log path.
+- `SRT_METRICS_LOG_PATH`: per-file JSONL metrics log path.
+- `SRT_GLOSSARY_MAX_TERMS`: max glossary entries injected per request.
+- `SRT_ALLOWED_ENGLISH_TERMS`: comma-separated technical terms allowed to remain in output.
+- `SRT_REQUEST_TIMEOUT`: request timeout in seconds.
+- `SRT_BLOCK_MIN_CUES`, `SRT_BLOCK_MAX_CUES`, `SRT_BLOCK_MAX_DURATION_MS`, `SRT_BLOCK_MAX_SOURCE_CHARS`, `SRT_BLOCK_MAX_GAP_MS`: block builder controls.
+- `SRT_MAX_CHARS_PER_LINE`, `SRT_MAX_LINES_PER_CUE`, `SRT_MAX_CPS`: readability thresholds.
 
 ## CS231n Preset
 
-The previously hard-coded prompt values were:
+The old hard-coded lecture preset is now expressed through `.env`:
 
 - `SRT_TRANSLATION_CONTEXT=These subtitles are the Stanford CS231n lecture on computer vision and deep learning.`
 - `SRT_TRANSLATION_STYLE=Translate in a spoken, explanatory lecture style (like a professor talking to students). Use polite Korean sentence endings consistently (e.g. 습니다체; '~입니다', '~할 수 있습니다'), but allow occasional softer variations such as '~하는 거죠', '~라는 겁니다' to sound natural in lecture context.`
 
-`.env.example` now includes those values directly so you can keep the old behavior by copying it as-is.
-
 ## Single File Usage
 
 ```bash
-python srt_en2ko_translator.py input.srt -o output.ko.srt --model gpt-4.1-mini
+python srt_en2ko_translator.py input.srt -o output.ko.srt --model gpt-4.1-mini --repair-model gpt-4o
 ```
 
 Useful flags:
 
-- `--batch-size 16`
-- `--repeat-fill`
+- `--block-max-cues 4`
 - `--glossary-log-path translation_artifacts/cs231n.jsonl`
-- `--disable-history-context`
+- `--disable-context-window`
+- `--openai-base-url ...`
 
 ## Batch Usage
 
 ```bash
-python batch_translate_srt.py ./cs231n_sp25/eng --model gpt-4.1-mini --repeat-fill --skip-existing --recursive
+python batch_translate_srt.py ./cs231n_sp25/eng --model gpt-4.1-mini --repair-model gpt-4o --skip-existing --recursive
 ```
 
-Batch runs reuse one translator instance and one glossary log, which improves terminology consistency across a lecture series.
+Batch runs reuse one translator instance and one glossary log, which helps keep terminology consistent across a lecture series.
 
-## Refactoring Notes
+## Evaluation
 
-Core logic is now split into small modules:
+Build a real review set from the CS231n Spring 2025 English SRT files:
 
-- `config.py`: `.env` loading and runtime config
-- `srt_io.py`: SRT parsing and writing
-- `grouping.py`: sentence grouping heuristics
-- `splitting.py`: weighted time-based re-splitting
-- `glossary.py`: JSONL glossary persistence
-- `translators.py`: model adapter and response parsing
-- `pipeline.py`: orchestration and fallback behavior
+```bash
+python3 build_eval_set.py --input-dir cs231n_sp25/eng --output evaluation/cs231n_sp25_eval.jsonl --target-count 40
+```
 
-This keeps the CLI thin and makes it easier to swap the translation backend later for self-hosted or deployable models.
+The generated JSONL is meant for manual review. Use `grouping_error`, `translation_error`, `glossary_inconsistency`, `wrap_readability`, and `context_inconsistency` in each entry's `review.failure_tags`.
+
+## Core Modules
+
+- `config.py`: `.env` loading and runtime config.
+- `blocks.py`: dynamic block building and context window selection.
+- `srt_io.py`: SRT parsing and writing.
+- `grouping.py`: sentence grouping heuristics used for context windows.
+- `glossary.py`: glossary persistence and retrieval.
+- `quality.py`: structure validation plus pre-wrap/post-wrap gates.
+- `translators.py`: model adapter and structured output handling.
+- `pipeline.py`: retry, repair, split fallback, and final orchestration.

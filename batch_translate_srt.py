@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import List
 
 from subtitle_translator import (
+    TranslationMetrics,
+    append_metrics_log,
     build_translator,
     create_glossary_store,
     load_runtime_config,
@@ -31,17 +33,27 @@ def find_files(root: Path, pattern: str, recursive: bool) -> List[Path]:
     return sorted(root.glob(pattern))
 
 
-def process_file(path: Path, translator, glossary_store, config) -> Path:
+def process_file(path: Path, translator, glossary_store, config) -> tuple[Path, TranslationMetrics]:
+    metrics = TranslationMetrics()
     cues = read_srt(str(path))
     out_cues = translate_srt(
         cues,
         translator=translator,
         config=config,
         glossary_store=glossary_store,
+        metrics=metrics,
     )
     out_path = path.with_name(path.stem + ".ko.srt")
     write_srt(out_cues, str(out_path))
-    return out_path
+    append_metrics_log(
+        config.metrics_log_path,
+        metrics,
+        input_path=str(path),
+        output_path=str(out_path),
+        phase1_model=translator.phase1_model,
+        repair_model=translator.repair_model,
+    )
+    return out_path, metrics
 
 
 def main():
@@ -123,13 +135,14 @@ def main():
         print(f"[{i}/{total}] START : {f}")
         for attempt in range(1, args.retries + 1):
             try:
-                out_path = process_file(
+                out_path, metrics = process_file(
                     f,
                     translator=translator,
                     glossary_store=glossary_store,
                     config=config,
                 )
                 print(f"[{i}/{total}] DONE  : {f.name} → {out_path.name}")
+                print(f"[{i}/{total}] METRIC: {metrics.summary()}")
                 done += 1
                 break
             except KeyboardInterrupt:
