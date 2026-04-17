@@ -1,0 +1,17 @@
+.DS_Store
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+cs231n_sp25/
+
+# Generated translation outputs
+*.ko.srt
+translation_artifacts/
+
+# Local scratch files
+*.log
