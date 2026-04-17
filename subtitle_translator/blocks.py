@@ -294,14 +294,13 @@ def _draft_reasons(cues: List[Cue]) -> List[str]:
 def _draft_actions(cues: List[Cue], reasons: List[str]) -> List[str]:
     if not reasons:
         return []
-    boundary_fragment_reasons = {
-        "dependent_start",
+    prompt_worthy_fragment_reasons = {
         "dependent_end",
         "numeric_orphan",
         "comparison_midstart",
         "qa_fragment",
     }
-    if any(reason in boundary_fragment_reasons for reason in reasons):
+    if any(reason in prompt_worthy_fragment_reasons for reason in reasons):
         return ["carry_context_only"]
     return []
 
