@@ -339,6 +339,7 @@ def _translate_block_recursive(
             metrics.add_reasons("failure", phase1_failure_reasons)
         else:
             metrics.phase1_success_blocks += 1
+            metrics.add_phase1_risk_flags(phase1_result.risk_flags)
 
     if phase1_result is None:
         signature = _failure_signature(phase1_failure_reasons or ["phase1_structure_failure"])

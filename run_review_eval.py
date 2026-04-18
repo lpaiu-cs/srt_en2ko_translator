@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -10,13 +11,36 @@ from subtitle_translator import (
     TranslationMetrics,
     build_translator,
     create_glossary_store,
+    hydrate_translation_block,
     load_runtime_config,
     read_srt,
 )
 from subtitle_translator.blocks import build_translation_blocks
-from subtitle_translator.models import Cue, TranslationBlock
+from subtitle_translator.models import Cue, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
 from subtitle_translator.pipeline import _translate_block_recursive
 from subtitle_translator.text import normalize_text
+from subtitle_translator.translators import BaseTranslator
+
+
+class TracingTranslator(BaseTranslator):
+    def __init__(self, inner: BaseTranslator):
+        self.inner = inner
+        self.phase1_risk_flags: List[str] = []
+        self.repair_risk_flags: List[str] = []
+
+    def reset(self) -> None:
+        self.phase1_risk_flags = []
+        self.repair_risk_flags = []
+
+    def translate_block(self, request: TranslationRequest) -> PhaseTranslationResult:
+        result = self.inner.translate_block(request)
+        self.phase1_risk_flags.extend(result.risk_flags)
+        return result
+
+    def repair_block(self, request: RepairRequest) -> PhaseTranslationResult:
+        result = self.inner.repair_block(request)
+        self.repair_risk_flags.extend(result.risk_flags)
+        return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input",
         default="evaluation/cs231n_sp25_eval_review_round1.jsonl",
-        help="Reviewed eval-set JSONL to replay against the current pipeline",
+        help="Reviewed eval-set JSONL or prior translated eval JSONL to replay",
     )
     parser.add_argument(
         "--output",
@@ -42,6 +66,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Phase2 repair model name (default: .env SRT_REPAIR_MODEL or gpt-4o)",
     )
     parser.add_argument(
+        "--phase1-temperature",
+        type=float,
+        default=None,
+        help="Override Phase1 temperature (use 0.0 for lower A/B eval noise)",
+    )
+    parser.add_argument(
+        "--repair-temperature",
+        type=float,
+        default=None,
+        help="Override repair temperature",
+    )
+    parser.add_argument(
+        "--prompt-profile",
+        default=None,
+        help="Override Phase1 prompt profile (for example: fragment_preserving_v1)",
+    )
+    parser.add_argument(
+        "--frozen-blocks",
+        action="store_true",
+        help="Replay the exact block stored in the input JSONL instead of rematching with the current block builder",
+    )
+    parser.add_argument(
         "--openai-base-url",
         default="https://api.openai.com/v1",
         help="Override OpenAI base URL",
@@ -56,6 +102,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _load_review_entries(path: Path) -> List[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _serialize_cues(cues: Iterable[Cue]) -> List[dict]:
+    return [
+        {
+            "cue_index": cue.index,
+            "start": cue.start,
+            "end": cue.end,
+            "text": cue.text,
+        }
+        for cue in cues
+    ]
+
+
+def _translated_text(cues: Iterable[Cue]) -> str:
+    return " ".join(normalize_text(cue.text) for cue in cues if normalize_text(cue.text))
+
+
+def _git_sha() -> str:
+    try:
+        output = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd="/Users/lpaiu/study/25-2/Translator",
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return output or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _block_dict_from_entry(entry: dict) -> dict:
+    return entry.get("current_block") or {
+        "cue_indices": entry["cue_indices"],
+        "source_cues": entry["source_cues"],
+        "source_text": entry.get("source_text", ""),
+        "block_lint": entry.get("block_lint", {"low_confidence": False, "lint_reasons": [], "lint_actions": []}),
+    }
 
 
 def _match_block(target_indices: List[int], blocks: List[TranslationBlock]) -> TranslationBlock:
@@ -78,23 +162,14 @@ def _match_block(target_indices: List[int], blocks: List[TranslationBlock]) -> T
     return best[3]
 
 
-def _serialize_cues(cues: Iterable[Cue]) -> List[dict]:
-    return [
-        {
-            "cue_index": cue.index,
-            "start": cue.start,
-            "end": cue.end,
-            "text": cue.text,
-        }
-        for cue in cues
-    ]
+def _load_cues_by_source(entries: List[dict]) -> Dict[str, List[Cue]]:
+    cues_by_source: Dict[str, List[Cue]] = {}
+    for source_file in sorted({entry["source_file"] for entry in entries}):
+        cues_by_source[source_file] = read_srt(source_file)
+    return cues_by_source
 
 
-def _translated_text(cues: Iterable[Cue]) -> str:
-    return " ".join(normalize_text(cue.text) for cue in cues if normalize_text(cue.text))
-
-
-def _load_blocks_by_lecture(entries: List[dict], config) -> Dict[str, List[TranslationBlock]]:
+def _build_dynamic_blocks(entries: List[dict], config) -> Dict[str, List[TranslationBlock]]:
     blocks_by_lecture: Dict[str, List[TranslationBlock]] = {}
     for lecture in sorted({entry["lecture"] for entry in entries}):
         lecture_entries = [entry for entry in entries if entry["lecture"] == lecture]
@@ -104,31 +179,86 @@ def _load_blocks_by_lecture(entries: List[dict], config) -> Dict[str, List[Trans
     return blocks_by_lecture
 
 
+def _hydrate_frozen_block(entry: dict, all_cues: List[Cue], config) -> TranslationBlock:
+    block_data = _block_dict_from_entry(entry)
+    cue_index_set = set(block_data["cue_indices"])
+    block_cues = [cue for cue in all_cues if cue.index in cue_index_set]
+    block_lint = block_data.get("block_lint", {})
+    return hydrate_translation_block(
+        block_cues,
+        all_cues,
+        config,
+        low_confidence=bool(block_lint.get("low_confidence", False)),
+        lint_reasons=list(block_lint.get("lint_reasons", [])),
+        lint_actions=list(block_lint.get("lint_actions", [])),
+    )
+
+
+def _input_review(entry: dict) -> dict:
+    return entry.get("review") or entry.get("round2_review") or entry.get("round1_review") or {}
+
+
+def _input_cue_indices(entry: dict) -> List[int]:
+    if "cue_indices" in entry:
+        return entry["cue_indices"]
+    if "round1_cue_indices" in entry:
+        return entry["round1_cue_indices"]
+    block_data = _block_dict_from_entry(entry)
+    return block_data.get("cue_indices", [])
+
+
 def main() -> int:
     args = build_parser().parse_args()
     review_path = Path(args.input).expanduser()
     output_path = Path(args.output).expanduser()
 
     config = load_runtime_config(glossary_log_path=args.glossary_log_path)
-    translator = build_translator(
-        config=config,
-        model=args.model or config.phase1_model,
-        repair_model=args.repair_model or config.repair_model,
-        base_url=args.openai_base_url,
+    if args.phase1_temperature is not None:
+        config.phase1_temperature = max(0.0, args.phase1_temperature)
+    if args.repair_temperature is not None:
+        config.repair_temperature = max(0.0, args.repair_temperature)
+    if args.prompt_profile:
+        config.phase1_prompt_profile = args.prompt_profile
+
+    tracing_translator = TracingTranslator(
+        build_translator(
+            config=config,
+            model=args.model or config.phase1_model,
+            repair_model=args.repair_model or config.repair_model,
+            base_url=args.openai_base_url,
+        )
     )
     glossary_store = create_glossary_store(config=config, glossary_log_path=args.glossary_log_path)
 
     review_entries = _load_review_entries(review_path)
-    blocks_by_lecture = _load_blocks_by_lecture(review_entries, config)
+    cues_by_source = _load_cues_by_source(review_entries)
+    blocks_by_lecture = None if args.frozen_blocks else _build_dynamic_blocks(review_entries, config)
+
+    provenance = {
+        "phase1_model": args.model or config.phase1_model,
+        "repair_model": args.repair_model or config.repair_model,
+        "phase1_temperature": config.phase1_temperature,
+        "repair_temperature": config.repair_temperature,
+        "prompt_profile": config.phase1_prompt_profile,
+        "git_sha": _git_sha(),
+        "frozen_block_input": args.frozen_blocks,
+        "openai_base_url": args.openai_base_url,
+    }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         for entry in review_entries:
-            block = _match_block(entry["cue_indices"], blocks_by_lecture[entry["lecture"]])
+            all_cues = cues_by_source[entry["source_file"]]
+            if args.frozen_blocks:
+                block = _hydrate_frozen_block(entry, all_cues, config)
+            else:
+                block = _match_block(_input_cue_indices(entry), blocks_by_lecture[entry["lecture"]])
+
+            tracing_translator.reset()
             metrics = TranslationMetrics()
             translated_cues = _translate_block_recursive(
                 block,
-                translator,
+                tracing_translator,
                 config,
                 glossary_store,
                 metrics,
@@ -140,8 +270,8 @@ def main() -> int:
                 "id": entry["id"],
                 "lecture": entry["lecture"],
                 "source_file": entry["source_file"],
-                "round1_review": entry.get("review", {}),
-                "round1_cue_indices": entry["cue_indices"],
+                "source_review": _input_review(entry),
+                "input_cue_indices": _input_cue_indices(entry),
                 "current_block": {
                     "cue_indices": [cue.index for cue in block.cues],
                     "source_cues": _serialize_cues(block.cues),
@@ -167,9 +297,12 @@ def main() -> int:
                     "failure_reasons": metrics.failure_reasons,
                     "pre_wrap_failures": metrics.pre_wrap_failures,
                     "post_wrap_failures": metrics.post_wrap_failures,
+                    "phase1_risk_flags": dict(metrics.phase1_risk_flags),
+                    "captured_phase1_risk_flags": sorted(set(tracing_translator.phase1_risk_flags)),
                     "average_cps": round(metrics.average_cps(), 3),
                 },
-                "round2_review": {
+                "provenance": provenance,
+                "review": {
                     "status": "pending",
                     "failure_tags": [],
                     "notes": "",

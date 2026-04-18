@@ -1,4 +1,5 @@
 from .config import RuntimeConfig, load_runtime_config, positive_int
+from .blocks import hydrate_translation_block
 from .glossary import GlossaryStore
 from .metrics import TranslationMetrics, append_metrics_log
 from .models import (
@@ -24,6 +25,7 @@ __all__ = [
     "EmittedCue",
     "GlossaryEntry",
     "GlossaryStore",
+    "hydrate_translation_block",
     "OpenAIChatTranslator",
     "PhaseTranslationResult",
     "QualityGateResult",

@@ -76,6 +76,9 @@ class RuntimeConfig:
     openai_api_key: str
     phase1_model: str
     repair_model: str
+    phase1_temperature: float
+    repair_temperature: float
+    phase1_prompt_profile: str
     translation_context: str
     translation_style: str
     use_context_window: bool
@@ -110,6 +113,9 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
         phase1_model=_resolve_phase1_model(),
         repair_model=(os.getenv("SRT_REPAIR_MODEL", "gpt-4o").strip() or "gpt-4o"),
+        phase1_temperature=max(0.0, _env_float("SRT_PHASE1_TEMPERATURE", 0.1)),
+        repair_temperature=max(0.0, _env_float("SRT_REPAIR_TEMPERATURE", 0.1)),
+        phase1_prompt_profile=(os.getenv("SRT_PHASE1_PROMPT_PROFILE", "fragment_preserving_v1").strip() or "fragment_preserving_v1"),
         translation_context=os.getenv("SRT_TRANSLATION_CONTEXT", "").strip(),
         translation_style=os.getenv("SRT_TRANSLATION_STYLE", "").strip(),
         use_context_window=_resolve_context_window_flag(),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import re
 from typing import Iterable, List
 
@@ -17,6 +18,8 @@ _PARTICLE_ONLY_RE = re.compile(
     r"^(은|는|이|가|을|를|에|의|도|만|와|과|로|으로|에서|부터|까지|보다|처럼|하고|및|또는|그리고|하지만|입니다|합니다|죠|겁니다)$"
 )
 _SENTENCE_END_RE = re.compile(r"(입니다|합니다|됩니다|거죠|겁니다|있습니다|없습니다|했다|한다|했다는|means\.?)$")
+_EXPLANATORY_CLOSER_RE = re.compile(r"(라는 뜻입니다|거죠|겁니다|라고 볼 수 있습니다|라고 할 수 있습니다)$")
+_RESTATEMENT_MARKER_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\b")
 
 
 def _unique(values: Iterable[str]) -> List[str]:
@@ -156,6 +159,42 @@ def _cue_cps(text: str, cue: Cue) -> float:
     return visible_chars / (duration_ms / 1000.0)
 
 
+def _fragment_overclosure_warnings(block: TranslationBlock, tgt_texts: List[str]) -> List[str]:
+    if "carry_context_only" not in block.lint_actions and "dependent_end" not in block.lint_reasons:
+        return []
+    for text in tgt_texts:
+        normalized = normalize_text(text)
+        if normalized and _EXPLANATORY_CLOSER_RE.search(normalized):
+            return ["fragment_overclosure"]
+    return []
+
+
+def _split_output_clauses(output_text: str) -> List[str]:
+    return [
+        normalize_text(fragment)
+        for fragment in re.split(r"[.!?]\s+|\n+", output_text)
+        if normalize_text(fragment)
+    ]
+
+
+def _duplicate_restatement_warnings(source_text: str, output_text: str) -> List[str]:
+    clauses = _split_output_clauses(output_text)
+    if len(clauses) < 2:
+        return []
+    if len(_split_output_clauses(source_text)) <= 1:
+        for clause in clauses[1:]:
+            if _RESTATEMENT_MARKER_RE.match(clause):
+                return ["duplicate_restatement"]
+    for left, right in zip(clauses, clauses[1:]):
+        if len(left) < 10 or len(right) < 10:
+            continue
+        if _RESTATEMENT_MARKER_RE.match(right):
+            return ["duplicate_restatement"]
+        if SequenceMatcher(a=left, b=right).ratio() >= 0.74:
+            return ["duplicate_restatement"]
+    return []
+
+
 def pre_wrap_gate(
     block: TranslationBlock,
     emitted_cues: List[EmittedCue],
@@ -202,6 +241,8 @@ def pre_wrap_gate(
     english_repair, english_warn = _english_residual_reasons(output_text, glossary_terms, config)
     repair.extend(english_repair)
     warnings.extend(english_warn)
+    warnings.extend(_fragment_overclosure_warnings(block, tgt_texts))
+    warnings.extend(_duplicate_restatement_warnings(source_text, output_text))
 
     for source_cue, emitted in zip(block.cues, emitted_cues):
         cps = _cue_cps(emitted.text, source_cue)

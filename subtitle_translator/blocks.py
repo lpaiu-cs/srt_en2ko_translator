@@ -272,6 +272,38 @@ def _context_for_block(start_pos: int, end_pos: int, windows: List[_SentenceWind
     return previous[-2:], following[:1]
 
 
+def hydrate_translation_block(
+    block_cues: List[Cue],
+    all_cues: List[Cue],
+    config: RuntimeConfig,
+    *,
+    low_confidence: bool = False,
+    lint_reasons: List[str] | None = None,
+    lint_actions: List[str] | None = None,
+) -> TranslationBlock:
+    if not block_cues:
+        return TranslationBlock(
+            cues=[],
+            low_confidence=low_confidence,
+            lint_reasons=lint_reasons or [],
+            lint_actions=lint_actions or [],
+        )
+    windows = _sentence_windows(all_cues or block_cues)
+    cue_pos = {cue.index: pos for pos, cue in enumerate(all_cues or block_cues)}
+    positions = [cue_pos[cue.index] for cue in block_cues if cue.index in cue_pos]
+    start_pos = min(positions) if positions else 0
+    end_pos = max(positions) if positions else len(block_cues) - 1
+    previous_context, next_context = _context_for_block(start_pos, end_pos, windows, config)
+    return TranslationBlock(
+        cues=block_cues,
+        previous_source_sentences=previous_context,
+        next_source_sentences=next_context,
+        low_confidence=low_confidence,
+        lint_reasons=lint_reasons or [],
+        lint_actions=lint_actions or [],
+    )
+
+
 def _draft_reasons(cues: List[Cue]) -> List[str]:
     text = _block_text(cues)
     reasons: List[str] = []
@@ -460,14 +492,13 @@ def build_translation_blocks(cues: List[Cue], config: RuntimeConfig) -> List[Tra
     cue_pos = {cue.index: pos for pos, cue in enumerate(cues)}
     for draft in repaired_drafts:
         positions = [cue_pos[cue.index] for cue in draft.cues if cue.index in cue_pos]
-        start_pos = min(positions)
-        end_pos = max(positions)
-        previous_context, next_context = _context_for_block(start_pos, end_pos, windows, config)
+        if not positions:
+            continue
         blocks.append(
-            TranslationBlock(
-                cues=draft.cues,
-                previous_source_sentences=previous_context,
-                next_source_sentences=next_context,
+            hydrate_translation_block(
+                draft.cues,
+                cues,
+                config,
                 low_confidence=draft.low_confidence,
                 lint_reasons=draft.lint_reasons,
                 lint_actions=draft.lint_actions,

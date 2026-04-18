@@ -12,12 +12,12 @@ from .splitting import ts_to_ms
 from .text import compact_spaces, normalize_text
 
 RISK_FLAG_ENUM = [
-    "front_sparse",
-    "tail_heavy",
+    "fragment_overclosure_risk",
+    "duplicate_restatement_risk",
+    "english_residual_risk",
+    "line_readability_risk",
     "glossary_uncertain",
     "context_uncertain",
-    "formula_uncertain",
-    "name_uncertain",
 ]
 
 
@@ -70,23 +70,151 @@ def _build_phase_schema(cue_count: int, schema_name: str) -> dict:
     }
 
 
+def _phase1_example_messages(prompt_profile: str) -> List[dict]:
+    if prompt_profile != "fragment_preserving_v1":
+        return []
+    examples = [
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["dependent_end"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 101,
+                        "start": "00:00:01,000",
+                        "end": "00:00:03,000",
+                        "text": "And the question was, if we use the same across the networks,",
+                        "duration_ms": 2000,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 101, "text": "그리고 질문은, 네트워크 전반에 걸쳐 같은 것을 사용한다면,"}
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["numeric_orphan"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 201,
+                        "start": "00:00:04,000",
+                        "end": "00:00:05,000",
+                        "text": "of 13% or 0.13.",
+                        "duration_ms": 1000,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 201, "text": "13% 또는 0.13입니다."}
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["qa_fragment"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 301,
+                        "start": "00:00:06,000",
+                        "end": "00:00:07,000",
+                        "text": "Yeah, yeah.",
+                        "duration_ms": 1000,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 301, "text": "네, 네."}
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": [],
+                    "lint_actions": [],
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 401,
+                        "start": "00:00:08,000",
+                        "end": "00:00:11,000",
+                        "text": "It's very low loss when you're predicting the correct class at very high probability.",
+                        "duration_ms": 3000,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 401, "text": "정답 클래스를 매우 높은 확률로 예측할 때 손실은 매우 낮습니다."}
+                ],
+                "risk_flags": [],
+            },
+        ),
+    ]
+    messages: List[dict] = []
+    for user_payload, assistant_payload in examples:
+        messages.append({"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(assistant_payload, ensure_ascii=False)})
+    return messages
+
+
 def build_phase1_system_prompt(config: RuntimeConfig) -> str:
     parts = [
         "You are a precise subtitle translator.",
         "Use context only to interpret the current block.",
+        "Priority order: cue count/order and anchor preservation > fragment shape preservation > natural Korean > lecture tone.",
         "Return exactly one emitted cue for each input cue.",
         "Keep cue order and cue count unchanged.",
         "Do not add or remove meaning.",
         "Do not leave the first cue empty unless the source cue is empty.",
         "Preserve numbers, formulas, brackets, and glossary terms.",
-        "Produce natural Korean while staying aligned to subtitle timing anchors.",
+        "Produce natural Korean only after preserving fragment shape and timing anchors.",
         "If there is a risk of poor alignment or readability, report short risk_flags.",
         "The input may include boundary lint flags and lint actions.",
-        "If lint_flags include dependent_start or comparison_midstart, treat the block as a mid-thought fragment and do not invent a missing lead-in.",
+        "Treat dependent_start as a diagnostic label only; do not change behavior solely because it is present.",
+        "If lint_flags include comparison_midstart, treat the block as a mid-thought fragment and do not invent a missing lead-in.",
         "If lint_flags include dependent_end, do not over-close the thought with added content that is not present.",
         "If lint_flags include qa_fragment, keep acknowledgements short and do not expand or duplicate them.",
         "If lint_flags include numeric_orphan, preserve numbers, ratios, symbols, and abbreviations exactly and do not add surrounding explanation.",
         "If lint_actions include carry_context_only, keep the current cue boundary and translate as a context-dependent fragment instead of forcing full local completeness.",
+        "For fragmentary blocks, do not add generic explanatory closings such as '...라는 뜻입니다', '...거죠', '...겁니다', or '...라고 볼 수 있습니다' unless the source directly supports them.",
+        "Do not restate the same meaning twice in a second paraphrastic sentence or clause.",
         f"Allowed risk_flags are: {', '.join(RISK_FLAG_ENUM)}.",
     ]
     if config.translation_context:
@@ -146,6 +274,7 @@ class OpenAIChatTranslator(BaseTranslator):
             raise RuntimeError("OPENAI_API_KEY is not set. Add it to the environment or .env file.")
         self.phase1_system_prompt = build_phase1_system_prompt(config)
         self.repair_system_prompt = build_repair_system_prompt(config)
+        self.phase1_example_messages = _phase1_example_messages(config.phase1_prompt_profile)
         self.session = requests.Session()
 
     def _payload_for_phase1(self, request: TranslationRequest) -> dict:
@@ -207,14 +336,24 @@ class OpenAIChatTranslator(BaseTranslator):
             ],
         }
 
-    def _structured_completion(self, model: str, system_prompt: str, payload: dict, cue_count: int, schema_name: str) -> PhaseTranslationResult:
+    def _structured_completion(
+        self,
+        model: str,
+        system_prompt: str,
+        payload: dict,
+        cue_count: int,
+        schema_name: str,
+        temperature: float,
+        example_messages: List[dict] | None = None,
+    ) -> PhaseTranslationResult:
         data = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            "temperature": 0.1,
+            "messages": (
+                [{"role": "system", "content": system_prompt}]
+                + list(example_messages or [])
+                + [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+            ),
+            "temperature": temperature,
             "response_format": _build_phase_schema(cue_count=cue_count, schema_name=schema_name),
         }
         headers = {
@@ -251,6 +390,8 @@ class OpenAIChatTranslator(BaseTranslator):
             payload=self._payload_for_phase1(request),
             cue_count=len(request.block.cues),
             schema_name="subtitle_phase1",
+            temperature=self.config.phase1_temperature,
+            example_messages=self.phase1_example_messages,
         )
 
     def repair_block(self, request: RepairRequest) -> PhaseTranslationResult:
@@ -260,6 +401,7 @@ class OpenAIChatTranslator(BaseTranslator):
             payload=self._payload_for_repair(request),
             cue_count=len(request.block.cues),
             schema_name="subtitle_phase2_repair",
+            temperature=self.config.repair_temperature,
         )
 
 

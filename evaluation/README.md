@@ -5,6 +5,7 @@ This directory holds manually reviewable evaluation artifacts built from the rea
 ## Files
 
 - `cs231n_sp25_eval.jsonl`: sampled translation blocks for review.
+- `*_translated*.jsonl`: pipeline replay outputs with translated cues, pipeline signals, and provenance for manual comparison.
 
 ## JSONL Schema
 
@@ -21,15 +22,24 @@ Each line contains:
 - `tag_scores`: category scores used only for sampling.
 - `review`: manual annotation stub.
 
+Translated replay JSONL also includes:
+
+- `current_block`: the exact block that was translated in that run.
+- `translation_output`: translated cues and joined translated text.
+- `pipeline_signals`: retry/repair/fallback signals plus captured `phase1_risk_flags`.
+- `provenance`: `phase1_model`, `repair_model`, temperatures, `prompt_profile`, `git_sha`, and whether `--frozen-blocks` was used.
+
 ## Review Tags
 
 Use the `review.failure_tags` array for manual labeling:
 
-- `grouping_error`
 - `translation_error`
-- `glossary_inconsistency`
-- `wrap_readability`
-- `context_inconsistency`
+- `awkward_local_closure`
+- `omission_addition`
+- `glossary_mismatch`
+- `english_residual`
+
+If you need source-side boundary diagnosis, keep it in `review.notes` or in a separate source-review pass instead of mixing it into the translation tags.
 
 Add short notes in `review.notes`.
 
@@ -40,3 +50,19 @@ python3 build_eval_set.py --input-dir cs231n_sp25/eng --output evaluation/cs231n
 ```
 
 The sampler is heuristic. It is meant to surface likely failure cases, not to be a gold benchmark by itself.
+
+## Replay
+
+Dynamic replay against the current block builder:
+
+```bash
+python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated.jsonl
+```
+
+Frozen-block prompt A/B replay:
+
+```bash
+python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v1
+```
+
+Use frozen-block mode when the variable under test is prompt/profile/model behavior rather than block-boundary changes.
