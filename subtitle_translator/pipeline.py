@@ -46,6 +46,11 @@ STYLE_RISK_TO_REASON = {
     "duplicate_restatement_risk": "duplicate_restatement",
 }
 
+STYLE_REASON_TO_RISK = {
+    reason: risk_flag
+    for risk_flag, reason in STYLE_RISK_TO_REASON.items()
+}
+
 
 def create_glossary_store(config: RuntimeConfig, glossary_log_path: Optional[str] = None) -> GlossaryStore:
     path = Path(glossary_log_path).expanduser() if glossary_log_path is not None else config.glossary_log_path
@@ -87,6 +92,11 @@ def _gate_warning_occurrences(pre_gate, post_gate, reasons: Sequence[str]) -> in
 
 def _post_wrap_score(post_gate) -> tuple[int, int]:
     return (len(post_gate.repair_reasons), len(post_gate.warning_reasons))
+
+
+def _style_risk_occurrences(result: PhaseTranslationResult, reasons: Sequence[str]) -> int:
+    allowed_risks = {STYLE_REASON_TO_RISK[reason] for reason in reasons if reason in STYLE_REASON_TO_RISK}
+    return sum(1 for risk_flag in result.risk_flags if risk_flag in allowed_risks)
 
 
 def _single_cue_wrap_score(cue: Cue, config: RuntimeConfig) -> tuple[tuple[int, int, int, int, int], object]:
@@ -181,6 +191,7 @@ def _style_retry_candidate_reasons(
 
 
 def _style_retry_feedback(
+    block: TranslationBlock,
     pre_gate,
     post_gate,
     style_retry_reasons: Sequence[str],
@@ -190,16 +201,44 @@ def _style_retry_feedback(
     preferred_actions: List[str] = []
     default_actions = {
         "fragment_overclosure": "keep_fragment_open",
-        "duplicate_restatement": "delete_repeat",
+        "duplicate_restatement": "delete_repeat_local",
     }
     seen_spans: set[str] = set()
 
     for reason in style_retry_reasons:
         details = pre_gate.warning_details.get(reason, []) + post_gate.warning_details.get(reason, [])
         if not details and reason in default_actions:
+            if reason == "duplicate_restatement" and len(block.cues) >= 2:
+                tail_cue = block.cues[-1]
+                normalized_tail = tail_cue.text.strip().lower()
+                fallback_action = (
+                    "restore_missing_tail"
+                    if normalized_tail.startswith(
+                        ("to ", "that ", "which ", "who ", "where ", "when ", "because ", "if ", "while ", "as ", "than ", "for ", "by ", "of ")
+                    )
+                    else default_actions[reason]
+                )
+                offending_cues.append(tail_cue.index)
+                offending_spans.append(
+                    {
+                        "cue_index": tail_cue.index,
+                        "cue_indices": [tail_cue.index],
+                        "span_text": "",
+                        "source_cue_text": tail_cue.text,
+                        "issue": "duplicate_restatement",
+                        "preferred_action": fallback_action,
+                    }
+                )
+                preferred_actions.append(fallback_action)
+                continue
             preferred_actions.append(default_actions[reason])
             continue
         for detail in details:
+            cue_indices = detail.get("cue_indices")
+            if isinstance(cue_indices, list):
+                for cue_index in cue_indices:
+                    if isinstance(cue_index, int) and cue_index not in offending_cues and cue_index >= 0:
+                        offending_cues.append(cue_index)
             cue_index = detail.get("cue_index")
             if isinstance(cue_index, int) and cue_index not in offending_cues and cue_index >= 0:
                 offending_cues.append(cue_index)
@@ -336,6 +375,7 @@ def _run_phase1_style_retry(
     block: TranslationBlock,
     phase1_result: PhaseTranslationResult,
     style_retry_reasons: List[str],
+    protected_cue_indices: List[int],
     offending_cue_indices: List[int],
     offending_spans: List[dict],
     preferred_actions: List[str],
@@ -351,6 +391,7 @@ def _run_phase1_style_retry(
         strict_style_retry=True,
         style_retry_reasons=style_retry_reasons,
         previous_emitted_cues=phase1_result.emitted_cues,
+        protected_cue_indices=protected_cue_indices,
         offending_cue_indices=offending_cue_indices,
         offending_spans=offending_spans,
         preferred_actions=preferred_actions,
@@ -395,6 +436,16 @@ def _repair_change_stats(current: PhaseTranslationResult, candidate: PhaseTransl
             changed_cues += 1
             changed_chars += _changed_chars(current_text, candidate_text)
     return changed_cues, changed_chars
+
+
+def _changed_cue_indices(current: PhaseTranslationResult, candidate: PhaseTranslationResult) -> List[int]:
+    current_by_index = {cue.cue_index: normalize_text(cue.text) for cue in current.emitted_cues}
+    candidate_by_index = {cue.cue_index: normalize_text(cue.text) for cue in candidate.emitted_cues}
+    changed: List[int] = []
+    for cue_index, current_text in current_by_index.items():
+        if current_text != candidate_by_index.get(cue_index, ""):
+            changed.append(cue_index)
+    return changed
 
 
 def _candidate_is_overedited(
@@ -449,7 +500,13 @@ def _choose_better_style_candidate(
     candidate_pre,
     candidate_post,
     style_retry_reasons: Sequence[str],
+    protected_cue_indices: Sequence[int],
 ):
+    if protected_cue_indices:
+        changed_protected = set(_changed_cue_indices(current_result, candidate_result)) & set(protected_cue_indices)
+        if changed_protected:
+            return current_result, current_pre, current_post, False
+
     current_repair_reasons = _gate_repair_reason_set(current_pre, current_post)
     candidate_repair_reasons = _gate_repair_reason_set(candidate_pre, candidate_post)
     if candidate_repair_reasons - current_repair_reasons:
@@ -459,13 +516,43 @@ def _choose_better_style_candidate(
 
     current_targeted = _gate_warning_occurrences(current_pre, current_post, style_retry_reasons)
     candidate_targeted = _gate_warning_occurrences(candidate_pre, candidate_post, style_retry_reasons)
+    current_risk_targeted = _style_risk_occurrences(current_result, style_retry_reasons)
+    candidate_risk_targeted = _style_risk_occurrences(candidate_result, style_retry_reasons)
     if candidate_targeted < current_targeted:
+        return candidate_result, candidate_pre, candidate_post, True
+    if candidate_targeted == current_targeted and candidate_risk_targeted < current_risk_targeted:
         return candidate_result, candidate_pre, candidate_post, True
 
     if candidate_targeted == current_targeted and _gate_score(candidate_pre, candidate_post) < _gate_score(current_pre, current_post):
         return candidate_result, candidate_pre, candidate_post, True
 
     return current_result, current_pre, current_post, False
+
+
+def _serialize_emitted_cues(result: PhaseTranslationResult) -> List[dict]:
+    return [{"cue_index": cue.cue_index, "text": normalize_text(cue.text)} for cue in result.emitted_cues]
+
+
+def _offending_cue_diffs(
+    base_result: PhaseTranslationResult,
+    strict_result: Optional[PhaseTranslationResult],
+    final_result: PhaseTranslationResult,
+    offending_cue_indices: Sequence[int],
+) -> List[dict]:
+    base_map = {cue.cue_index: normalize_text(cue.text) for cue in base_result.emitted_cues}
+    strict_map = {cue.cue_index: normalize_text(cue.text) for cue in strict_result.emitted_cues} if strict_result else {}
+    final_map = {cue.cue_index: normalize_text(cue.text) for cue in final_result.emitted_cues}
+    diffs: List[dict] = []
+    for cue_index in offending_cue_indices:
+        diffs.append(
+            {
+                "cue_index": cue_index,
+                "base_text": base_map.get(cue_index, ""),
+                "strict_candidate_text": strict_map.get(cue_index, ""),
+                "final_text": final_map.get(cue_index, ""),
+            }
+        )
+    return diffs
 
 
 def _translate_block_recursive(
@@ -533,18 +620,40 @@ def _translate_block_recursive(
     final_result = phase1_result
     final_pre = pre_gate
     final_post = post_gate
+    strict_phase1: Optional[PhaseTranslationResult] = None
 
     style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
     if style_retry_reasons:
         offending_cue_indices, offending_spans, preferred_actions = _style_retry_feedback(
+            block,
             pre_gate,
             post_gate,
             style_retry_reasons,
         )
+        offending_cue_index_set = set(offending_cue_indices)
+        protected_cue_indices = (
+            [
+                cue.index
+                for cue in block.cues
+                if cue.index not in offending_cue_index_set
+            ]
+            if offending_cue_index_set
+            else []
+        )
+        if metrics:
+            metrics.style_retry_trace = {
+                "reasons": list(style_retry_reasons),
+                "offending_cue_indices": list(offending_cue_indices),
+                "protected_cue_indices": list(protected_cue_indices),
+                "offending_spans": list(offending_spans),
+                "preferred_actions": list(preferred_actions),
+                "base_phase1_emitted_cues": _serialize_emitted_cues(phase1_result),
+            }
         strict_phase1 = _run_phase1_style_retry(
             block,
             phase1_result,
             style_retry_reasons,
+            protected_cue_indices,
             offending_cue_indices,
             offending_spans,
             preferred_actions,
@@ -555,6 +664,9 @@ def _translate_block_recursive(
         if strict_phase1 is not None:
             if metrics:
                 metrics.add_strict_retry_candidate_risk_flags(strict_phase1.risk_flags)
+                metrics.style_retry_trace["strict_candidate_emitted_cues"] = _serialize_emitted_cues(strict_phase1)
+                metrics.style_retry_trace["strict_candidate_risk_flags"] = list(strict_phase1.risk_flags)
+                metrics.style_retry_trace["accepted"] = False
             strict_pre = pre_wrap_gate(block, strict_phase1.emitted_cues, glossary_terms, config)
             wrapped_strict = _wrap_phase_result(block, strict_phase1, config, metrics)
             strict_post = post_wrap_gate(wrapped_strict, config)
@@ -583,15 +695,30 @@ def _translate_block_recursive(
                     strict_pre,
                     strict_post,
                     style_retry_reasons,
+                    protected_cue_indices,
                 )
                 if metrics:
                     if accepted:
                         metrics.style_retry_accepted += 1
                     else:
                         metrics.style_retry_rejected += 1
+                    metrics.style_retry_trace["accepted"] = accepted
+        elif metrics:
+            metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
+            metrics.style_retry_trace["strict_candidate_risk_flags"] = []
+            metrics.style_retry_trace["accepted"] = False
 
     if metrics:
         metrics.add_phase1_risk_flags(final_result.risk_flags)
+        if metrics.style_retry_trace:
+            metrics.style_retry_trace["final_emitted_cues"] = _serialize_emitted_cues(final_result)
+            metrics.style_retry_trace["final_risk_flags"] = list(final_result.risk_flags)
+            metrics.style_retry_trace["offending_cue_diffs"] = _offending_cue_diffs(
+                phase1_result,
+                strict_phase1,
+                final_result,
+                metrics.style_retry_trace.get("offending_cue_indices", []),
+            )
 
     if config.repair_enabled and (final_pre.repair_needed or final_post.repair_needed):
         failure_reasons = _repair_candidate_reasons(block, final_pre, final_post)

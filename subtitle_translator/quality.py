@@ -23,6 +23,11 @@ _EXPLANATORY_CLOSER_RE = re.compile(
 )
 _RESTATEMENT_MARKER_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\b")
 _PROPOSITION_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)|[,;:](?:\s*|$)|\s*[—–-]\s+|\n+")
+_TAIL_RESTORE_SOURCE_RE = re.compile(
+    r"^(to\b|that\b|which\b|who\b|whom\b|whose\b|where\b|when\b|why\b|because\b|if\b|while\b|as\b|than\b|rather\b|for\b|by\b|of\b|with\b|without\b|into\b|from\b|in order to\b)",
+    re.IGNORECASE,
+)
+_DISCOURSE_MARKER_HEAD_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\s*[,，]?\s*")
 
 
 def _unique(values: Iterable[str]) -> List[str]:
@@ -182,6 +187,16 @@ def _fragment_overclosure_details(block: TranslationBlock, tgt_texts: List[str])
                     "preferred_action": "keep_fragment_open",
                 }
             )
+        discourse_match = _DISCOURSE_MARKER_HEAD_RE.match(normalized)
+        if normalized and discourse_match and "dependent_end" in block.lint_reasons:
+            details.append(
+                {
+                    "cue_index": cue.index,
+                    "span_text": discourse_match.group(0).strip(),
+                    "issue": "fragment_overclosure",
+                    "preferred_action": "keep_fragment_open",
+                }
+            )
     return details
 
 
@@ -194,7 +209,7 @@ def _split_output_clauses(output_text: str) -> List[str]:
 
 
 def _duplicate_restatement_warnings(source_text: str, output_text: str) -> List[str]:
-    return ["duplicate_restatement"] if _duplicate_restatement_details(source_text, output_text, []) else []
+    return ["duplicate_restatement"] if _duplicate_restatement_details(source_text, output_text, [], {}) else []
 
 
 def _split_propositions(text: str) -> List[dict]:
@@ -264,7 +279,17 @@ def _proposition_entries(emitted_cues: List[EmittedCue]) -> List[dict]:
     return entries
 
 
-def _duplicate_restatement_details(source_text: str, output_text: str, emitted_cues: List[EmittedCue]) -> List[dict]:
+def _source_cue_prefers_tail_restore(source_text: str) -> bool:
+    normalized = normalize_text(source_text)
+    return bool(normalized and _TAIL_RESTORE_SOURCE_RE.match(normalized))
+
+
+def _duplicate_restatement_details(
+    source_text: str,
+    output_text: str,
+    emitted_cues: List[EmittedCue],
+    source_cue_map: Dict[int, str],
+) -> List[dict]:
     source_clause_count = len(_split_output_clauses(source_text))
     details: List[dict] = []
 
@@ -286,6 +311,12 @@ def _duplicate_restatement_details(source_text: str, output_text: str, emitted_c
         right_text = right["text"]
         if len(left_text) < 6 or len(right_text) < 6:
             continue
+        right_source_text = source_cue_map.get(right["cue_index"], "")
+        preferred_action = (
+            "restore_missing_tail"
+            if left["cue_index"] != right["cue_index"] and _source_cue_prefers_tail_restore(right_source_text)
+            else "delete_repeat_local"
+        )
         if source_clause_count <= 1 and _RESTATEMENT_MARKER_RE.match(right_text):
             details.append(
                 {
@@ -294,8 +325,9 @@ def _duplicate_restatement_details(source_text: str, output_text: str, emitted_c
                     "span_text": right["span_text"],
                     "left_text": left_text,
                     "right_text": right_text,
+                    "source_cue_text": right_source_text,
                     "issue": "duplicate_restatement",
-                    "preferred_action": "delete_repeat",
+                    "preferred_action": preferred_action,
                 }
             )
             continue
@@ -307,8 +339,9 @@ def _duplicate_restatement_details(source_text: str, output_text: str, emitted_c
                     "span_text": right["span_text"],
                     "left_text": left_text,
                     "right_text": right_text,
+                    "source_cue_text": right_source_text,
                     "issue": "duplicate_restatement",
-                    "preferred_action": "delete_repeat",
+                    "preferred_action": preferred_action,
                 }
             )
 
@@ -366,7 +399,12 @@ def pre_wrap_gate(
     if fragment_details:
         warnings.append("fragment_overclosure")
         warning_details["fragment_overclosure"] = fragment_details
-    duplicate_details = _duplicate_restatement_details(source_text, output_text, emitted_cues)
+    duplicate_details = _duplicate_restatement_details(
+        source_text,
+        output_text,
+        emitted_cues,
+        {cue.index: cue.text for cue in block.cues},
+    )
     if duplicate_details:
         warnings.append("duplicate_restatement")
         warning_details["duplicate_restatement"] = duplicate_details

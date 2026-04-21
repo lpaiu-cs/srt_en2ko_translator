@@ -49,6 +49,7 @@ class TranslationRequest:
     strict_style_retry: bool = False
     style_retry_reasons: List[str] = field(default_factory=list)
     previous_emitted_cues: List[EmittedCue] = field(default_factory=list)
+    protected_cue_indices: List[int] = field(default_factory=list)
     offending_cue_indices: List[int] = field(default_factory=list)
     offending_spans: List[Dict[str, Any]] = field(default_factory=list)
     preferred_actions: List[str] = field(default_factory=list)

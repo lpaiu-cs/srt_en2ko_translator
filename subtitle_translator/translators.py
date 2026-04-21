@@ -184,6 +184,58 @@ def _phase1_examples_v1() -> List[tuple[dict, dict]]:
                 "risk_flags": [],
             },
         ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["dependent_end"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "여기서 흔히 볼 수 있는 주황색 블록들은, 3x3 컨볼루션 레이어입니다. 즉, 이런 것들이 컨볼루션 레이어라는 겁니다,",
+                    "note": "Do not inject discourse markers like 즉 or 다시 말해 to close a relative-clause tail.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 481,
+                        "start": "00:00:15,500",
+                        "end": "00:00:17,300",
+                        "text": "So these orange blocks",
+                        "duration_ms": 1800,
+                        "gap_after_ms": 40,
+                    },
+                    {
+                        "cue_index": 482,
+                        "start": "00:00:17,340",
+                        "end": "00:00:18,800",
+                        "text": "are 3 by 3 convolution layers.",
+                        "duration_ms": 1460,
+                        "gap_after_ms": 50,
+                    },
+                    {
+                        "cue_index": 483,
+                        "start": "00:00:18,850",
+                        "end": "00:00:20,100",
+                        "text": "So these are convolution layers that",
+                        "duration_ms": 1250,
+                        "gap_after_ms": 0,
+                    },
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 481, "text": "여기서 흔히 볼 수 있는 주황색 블록들은,"},
+                    {"cue_index": 482, "text": "3x3 컨볼루션 레이어입니다."},
+                    {"cue_index": 483, "text": "이런 건 컨볼루션 레이어인데"},
+                ],
+                "risk_flags": [],
+            },
+        ),
     ]
 
 
@@ -517,8 +569,10 @@ def build_phase1_system_prompt(
                 "It is better to end with a comma, dash, or bare fragment than to add a lecture-style sentence ending that is not supported.",
                 "Do not add a second sentence or clause that only rephrases the first.",
                 "Rewrite only the offending cues or offending spans when possible.",
+                "Keep protected cues unchanged unless preserving them would directly prevent fixing the listed style problem.",
                 "If preferred_actions include keep_fragment_open, delete unsupported trailing explanation instead of replacing it with another explanatory tail.",
-                "If preferred_actions include delete_repeat, remove the repeated proposition instead of paraphrasing it again.",
+                "If preferred_actions include delete_repeat_local, remove the repeated local proposition instead of paraphrasing it again.",
+                "If preferred_actions include restore_missing_tail, rewrite the offending cue so it restores that cue's missing local source meaning instead of repeating the previous cue.",
                 "Keep unaffected cues as close as possible to the previous anchor-preserving wording.",
             ]
         )
@@ -618,6 +672,7 @@ class OpenAIChatTranslator(BaseTranslator):
                     {"cue_index": cue.cue_index, "text": cue.text}
                     for cue in request.previous_emitted_cues
                 ],
+                "protected_cue_indices": request.protected_cue_indices,
                 "offending_cue_indices": request.offending_cue_indices,
                 "offending_spans": request.offending_spans,
                 "preferred_actions": request.preferred_actions,

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from .models import Cue
 from .splitting import ts_to_ms
@@ -33,6 +33,7 @@ class TranslationMetrics:
     post_wrap_failures: Dict[str, int] = field(default_factory=dict)
     phase1_risk_flags: Dict[str, int] = field(default_factory=dict)
     strict_retry_candidate_risk_flags: Dict[str, int] = field(default_factory=dict)
+    style_retry_trace: Dict[str, Any] = field(default_factory=dict)
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
     tail_heavy_count: int = 0

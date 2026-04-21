@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override Phase1 prompt profile (for example: fragment_preserving_v2)",
     )
     parser.add_argument(
+        "--disable-repair",
+        action="store_true",
+        help="Turn off Phase2 repair to isolate Phase1/style-retry behavior",
+    )
+    parser.add_argument(
         "--frozen-blocks",
         action="store_true",
         help="Replay the exact block stored in the input JSONL instead of rematching with the current block builder",
@@ -219,6 +224,8 @@ def main() -> int:
         config.repair_temperature = max(0.0, args.repair_temperature)
     if args.prompt_profile:
         config.phase1_prompt_profile = args.prompt_profile
+    if args.disable_repair:
+        config.repair_enabled = False
 
     tracing_translator = TracingTranslator(
         build_translator(
@@ -241,6 +248,7 @@ def main() -> int:
         "phase1_temperature": config.phase1_temperature,
         "repair_temperature": config.repair_temperature,
         "prompt_profile": config.phase1_prompt_profile,
+        "repair_enabled": config.repair_enabled,
         "git_sha": _git_sha(),
         "frozen_block_input": args.frozen_blocks,
         "openai_base_url": args.openai_base_url,
@@ -306,6 +314,7 @@ def main() -> int:
                     "strict_retry_candidate_risk_flags": dict(metrics.strict_retry_candidate_risk_flags),
                     "captured_phase1_risk_flags": sorted(set(tracing_translator.phase1_risk_flags)),
                     "average_cps": round(metrics.average_cps(), 3),
+                    "style_retry_trace": metrics.style_retry_trace,
                 },
                 "provenance": provenance,
                 "review": {
