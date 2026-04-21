@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -49,6 +49,9 @@ class TranslationRequest:
     strict_style_retry: bool = False
     style_retry_reasons: List[str] = field(default_factory=list)
     previous_emitted_cues: List[EmittedCue] = field(default_factory=list)
+    offending_cue_indices: List[int] = field(default_factory=list)
+    offending_spans: List[Dict[str, Any]] = field(default_factory=list)
+    preferred_actions: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -70,6 +73,7 @@ class QualityGateResult:
     repair_needed: bool
     repair_reasons: List[str] = field(default_factory=list)
     warning_reasons: List[str] = field(default_factory=list)
+    warning_details: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass

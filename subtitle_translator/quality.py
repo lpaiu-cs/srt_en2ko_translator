@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 import re
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 
 from .config import RuntimeConfig
 from .models import Cue, EmittedCue, GlossaryEntry, QualityGateResult, SchemaValidationResult, TranslationBlock
@@ -22,6 +22,7 @@ _EXPLANATORY_CLOSER_RE = re.compile(
     r"(라는 뜻입니다|거죠|겁니다|라고 볼 수 있습니다|라고 할 수 있습니다)(?:[\"'”’),，、\s]*)$"
 )
 _RESTATEMENT_MARKER_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\b")
+_PROPOSITION_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)|[,;:](?:\s*|$)|\s*[—–-]\s+|\n+")
 
 
 def _unique(values: Iterable[str]) -> List[str]:
@@ -162,13 +163,26 @@ def _cue_cps(text: str, cue: Cue) -> float:
 
 
 def _fragment_overclosure_warnings(block: TranslationBlock, tgt_texts: List[str]) -> List[str]:
+    return ["fragment_overclosure"] if _fragment_overclosure_details(block, tgt_texts) else []
+
+
+def _fragment_overclosure_details(block: TranslationBlock, tgt_texts: List[str]) -> List[dict]:
     if "carry_context_only" not in block.lint_actions and "dependent_end" not in block.lint_reasons:
         return []
-    for text in tgt_texts:
+    details: List[dict] = []
+    for cue, text in zip(block.cues, tgt_texts):
         normalized = normalize_text(text)
-        if normalized and _EXPLANATORY_CLOSER_RE.search(normalized):
-            return ["fragment_overclosure"]
-    return []
+        match = _EXPLANATORY_CLOSER_RE.search(normalized)
+        if normalized and match:
+            details.append(
+                {
+                    "cue_index": cue.index,
+                    "span_text": match.group(0),
+                    "issue": "fragment_overclosure",
+                    "preferred_action": "keep_fragment_open",
+                }
+            )
+    return details
 
 
 def _split_output_clauses(output_text: str) -> List[str]:
@@ -180,21 +194,125 @@ def _split_output_clauses(output_text: str) -> List[str]:
 
 
 def _duplicate_restatement_warnings(source_text: str, output_text: str) -> List[str]:
-    clauses = _split_output_clauses(output_text)
-    if len(clauses) < 2:
-        return []
-    if len(_split_output_clauses(source_text)) <= 1:
-        for clause in clauses[1:]:
-            if _RESTATEMENT_MARKER_RE.match(clause):
-                return ["duplicate_restatement"]
-    for left, right in zip(clauses, clauses[1:]):
-        if len(left) < 10 or len(right) < 10:
+    return ["duplicate_restatement"] if _duplicate_restatement_details(source_text, output_text, []) else []
+
+
+def _split_propositions(text: str) -> List[dict]:
+    propositions: List[dict] = []
+    last_end = 0
+    for match in _PROPOSITION_SPLIT_RE.finditer(text):
+        segment = normalize_text(text[last_end:match.start()])
+        if segment:
+            propositions.append(
+                {
+                    "text": segment,
+                    "start": last_end,
+                    "end": match.start(),
+                }
+            )
+        last_end = match.end()
+    tail = normalize_text(text[last_end:])
+    if tail:
+        propositions.append(
+            {
+                "text": tail,
+                "start": last_end,
+                "end": len(text),
+            }
+        )
+    return propositions
+
+
+def _looks_like_duplicate_proposition(left: str, right: str) -> bool:
+    left_norm = normalize_text(left)
+    right_norm = normalize_text(right)
+    right_wo_marker = normalize_text(_RESTATEMENT_MARKER_RE.sub("", right_norm))
+    if left_norm == right_norm and len(left_norm) >= 6:
+        return True
+    if right_wo_marker and len(right_wo_marker) >= 6:
+        if left_norm == right_wo_marker:
+            return True
+        if right_wo_marker in left_norm or left_norm in right_wo_marker:
+            shorter = min(len(left_norm), len(right_wo_marker))
+            longer = max(len(left_norm), len(right_wo_marker), 1)
+            if shorter >= 8 and shorter / longer >= 0.70:
+                return True
+        if SequenceMatcher(a=left_norm, b=right_wo_marker).ratio() >= 0.70 and min(len(left_norm), len(right_wo_marker)) >= 8:
+            return True
+    if right_norm in left_norm or left_norm in right_norm:
+        shorter = min(len(left_norm), len(right_norm))
+        longer = max(len(left_norm), len(right_norm), 1)
+        if shorter >= 8 and shorter / longer >= 0.72:
+            return True
+    return SequenceMatcher(a=left_norm, b=right_norm).ratio() >= 0.78 and min(len(left_norm), len(right_norm)) >= 10
+
+
+def _proposition_entries(emitted_cues: List[EmittedCue]) -> List[dict]:
+    entries: List[dict] = []
+    for cue in emitted_cues:
+        cue_text = normalize_text(cue.text)
+        for proposition in _split_propositions(cue_text):
+            entries.append(
+                {
+                    "cue_index": cue.cue_index,
+                    "text": proposition["text"],
+                    "span_text": cue_text[proposition["start"] : proposition["end"]].strip(),
+                    "start": proposition["start"],
+                    "end": proposition["end"],
+                }
+            )
+    return entries
+
+
+def _duplicate_restatement_details(source_text: str, output_text: str, emitted_cues: List[EmittedCue]) -> List[dict]:
+    source_clause_count = len(_split_output_clauses(source_text))
+    details: List[dict] = []
+
+    proposition_entries = _proposition_entries(emitted_cues) if emitted_cues else []
+    if not proposition_entries:
+        proposition_entries = [
+            {
+                "cue_index": -1,
+                "text": proposition["text"],
+                "span_text": proposition["text"],
+                "start": proposition["start"],
+                "end": proposition["end"],
+            }
+            for proposition in _split_propositions(output_text)
+        ]
+
+    for left, right in zip(proposition_entries, proposition_entries[1:]):
+        left_text = left["text"]
+        right_text = right["text"]
+        if len(left_text) < 6 or len(right_text) < 6:
             continue
-        if _RESTATEMENT_MARKER_RE.match(right):
-            return ["duplicate_restatement"]
-        if SequenceMatcher(a=left, b=right).ratio() >= 0.74:
-            return ["duplicate_restatement"]
-    return []
+        if source_clause_count <= 1 and _RESTATEMENT_MARKER_RE.match(right_text):
+            details.append(
+                {
+                    "cue_index": right["cue_index"],
+                    "cue_indices": [left["cue_index"], right["cue_index"]],
+                    "span_text": right["span_text"],
+                    "left_text": left_text,
+                    "right_text": right_text,
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "delete_repeat",
+                }
+            )
+            continue
+        if _looks_like_duplicate_proposition(left_text, right_text):
+            details.append(
+                {
+                    "cue_index": right["cue_index"],
+                    "cue_indices": [left["cue_index"], right["cue_index"]],
+                    "span_text": right["span_text"],
+                    "left_text": left_text,
+                    "right_text": right_text,
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "delete_repeat",
+                }
+            )
+
+    return details
 
 
 def pre_wrap_gate(
@@ -205,6 +323,7 @@ def pre_wrap_gate(
 ) -> QualityGateResult:
     repair: List[str] = []
     warnings: List[str] = list(block.lint_reasons)
+    warning_details: Dict[str, List[dict]] = {}
 
     tgt_texts = [normalize_text(cue.text) for cue in emitted_cues]
     output_text = " ".join(text for text in tgt_texts if text)
@@ -243,8 +362,14 @@ def pre_wrap_gate(
     english_repair, english_warn = _english_residual_reasons(output_text, glossary_terms, config)
     repair.extend(english_repair)
     warnings.extend(english_warn)
-    warnings.extend(_fragment_overclosure_warnings(block, tgt_texts))
-    warnings.extend(_duplicate_restatement_warnings(source_text, output_text))
+    fragment_details = _fragment_overclosure_details(block, tgt_texts)
+    if fragment_details:
+        warnings.append("fragment_overclosure")
+        warning_details["fragment_overclosure"] = fragment_details
+    duplicate_details = _duplicate_restatement_details(source_text, output_text, emitted_cues)
+    if duplicate_details:
+        warnings.append("duplicate_restatement")
+        warning_details["duplicate_restatement"] = duplicate_details
 
     for source_cue, emitted in zip(block.cues, emitted_cues):
         cps = _cue_cps(emitted.text, source_cue)
@@ -259,6 +384,7 @@ def pre_wrap_gate(
         repair_needed=bool(repair),
         repair_reasons=_unique(repair),
         warning_reasons=_unique(warnings),
+        warning_details=warning_details,
     )
 
 

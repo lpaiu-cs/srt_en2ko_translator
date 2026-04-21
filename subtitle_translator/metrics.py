@@ -32,6 +32,7 @@ class TranslationMetrics:
     pre_wrap_failures: Dict[str, int] = field(default_factory=dict)
     post_wrap_failures: Dict[str, int] = field(default_factory=dict)
     phase1_risk_flags: Dict[str, int] = field(default_factory=dict)
+    strict_retry_candidate_risk_flags: Dict[str, int] = field(default_factory=dict)
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
     tail_heavy_count: int = 0
@@ -66,6 +67,10 @@ class TranslationMetrics:
         for flag in risk_flags:
             self.phase1_risk_flags[flag] = self.phase1_risk_flags.get(flag, 0) + 1
 
+    def add_strict_retry_candidate_risk_flags(self, risk_flags: Iterable[str]) -> None:
+        for flag in risk_flags:
+            self.strict_retry_candidate_risk_flags[flag] = self.strict_retry_candidate_risk_flags.get(flag, 0) + 1
+
     def average_cps(self) -> float:
         if self.final_cue_count == 0:
             return 0.0
@@ -98,6 +103,7 @@ class TranslationMetrics:
             "pre_wrap_failures": self.pre_wrap_failures,
             "post_wrap_failures": self.post_wrap_failures,
             "phase1_risk_flags": self.phase1_risk_flags,
+            "strict_retry_candidate_risk_flags": self.strict_retry_candidate_risk_flags,
         }
 
     def summary(self) -> str:

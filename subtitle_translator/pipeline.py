@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -67,6 +68,25 @@ def _gate_score(pre_gate, post_gate) -> tuple[int, int]:
         len(pre_gate.repair_reasons) + len(post_gate.repair_reasons),
         len(pre_gate.warning_reasons) + len(post_gate.warning_reasons),
     )
+
+
+def _gate_repair_reason_set(pre_gate, post_gate) -> set[str]:
+    return set(pre_gate.repair_reasons) | set(post_gate.repair_reasons)
+
+
+def _gate_warning_occurrences(pre_gate, post_gate, reasons: Sequence[str]) -> int:
+    total = 0
+    for reason in reasons:
+        detail_count = len(pre_gate.warning_details.get(reason, [])) + len(post_gate.warning_details.get(reason, []))
+        if detail_count:
+            total += detail_count
+        elif reason in pre_gate.warning_reasons or reason in post_gate.warning_reasons:
+            total += 1
+    return total
+
+
+def _post_wrap_score(post_gate) -> tuple[int, int]:
+    return (len(post_gate.repair_reasons), len(post_gate.warning_reasons))
 
 
 def _single_cue_wrap_score(cue: Cue, config: RuntimeConfig) -> tuple[tuple[int, int, int, int, int], object]:
@@ -158,6 +178,41 @@ def _style_retry_candidate_reasons(
         if mapped and mapped not in reasons:
             reasons.append(mapped)
     return reasons
+
+
+def _style_retry_feedback(
+    pre_gate,
+    post_gate,
+    style_retry_reasons: Sequence[str],
+) -> tuple[List[int], List[dict], List[str]]:
+    offending_cues: List[int] = []
+    offending_spans: List[dict] = []
+    preferred_actions: List[str] = []
+    default_actions = {
+        "fragment_overclosure": "keep_fragment_open",
+        "duplicate_restatement": "delete_repeat",
+    }
+    seen_spans: set[str] = set()
+
+    for reason in style_retry_reasons:
+        details = pre_gate.warning_details.get(reason, []) + post_gate.warning_details.get(reason, [])
+        if not details and reason in default_actions:
+            preferred_actions.append(default_actions[reason])
+            continue
+        for detail in details:
+            cue_index = detail.get("cue_index")
+            if isinstance(cue_index, int) and cue_index not in offending_cues and cue_index >= 0:
+                offending_cues.append(cue_index)
+            action = detail.get("preferred_action")
+            if isinstance(action, str) and action:
+                preferred_actions.append(action)
+            signature = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+            if signature in seen_spans:
+                continue
+            seen_spans.add(signature)
+            offending_spans.append(detail)
+
+    return sorted(offending_cues), offending_spans, list(dict.fromkeys(preferred_actions))
 
 
 def _glossary_terms_for_block(block: TranslationBlock, glossary_store: Optional[GlossaryStore]) -> list:
@@ -281,6 +336,9 @@ def _run_phase1_style_retry(
     block: TranslationBlock,
     phase1_result: PhaseTranslationResult,
     style_retry_reasons: List[str],
+    offending_cue_indices: List[int],
+    offending_spans: List[dict],
+    preferred_actions: List[str],
     translator: BaseTranslator,
     glossary_terms: list,
     metrics: Optional[TranslationMetrics],
@@ -293,6 +351,9 @@ def _run_phase1_style_retry(
         strict_style_retry=True,
         style_retry_reasons=style_retry_reasons,
         previous_emitted_cues=phase1_result.emitted_cues,
+        offending_cue_indices=offending_cue_indices,
+        offending_spans=offending_spans,
+        preferred_actions=preferred_actions,
     )
     try:
         retried = translator.translate_block(request)
@@ -380,6 +441,33 @@ def _choose_better_candidate(
     return current_result, current_pre, current_post, False
 
 
+def _choose_better_style_candidate(
+    current_result: PhaseTranslationResult,
+    current_pre,
+    current_post,
+    candidate_result: PhaseTranslationResult,
+    candidate_pre,
+    candidate_post,
+    style_retry_reasons: Sequence[str],
+):
+    current_repair_reasons = _gate_repair_reason_set(current_pre, current_post)
+    candidate_repair_reasons = _gate_repair_reason_set(candidate_pre, candidate_post)
+    if candidate_repair_reasons - current_repair_reasons:
+        return current_result, current_pre, current_post, False
+    if _post_wrap_score(candidate_post) > _post_wrap_score(current_post):
+        return current_result, current_pre, current_post, False
+
+    current_targeted = _gate_warning_occurrences(current_pre, current_post, style_retry_reasons)
+    candidate_targeted = _gate_warning_occurrences(candidate_pre, candidate_post, style_retry_reasons)
+    if candidate_targeted < current_targeted:
+        return candidate_result, candidate_pre, candidate_post, True
+
+    if candidate_targeted == current_targeted and _gate_score(candidate_pre, candidate_post) < _gate_score(current_pre, current_post):
+        return candidate_result, candidate_pre, candidate_post, True
+
+    return current_result, current_pre, current_post, False
+
+
 def _translate_block_recursive(
     block: TranslationBlock,
     translator: BaseTranslator,
@@ -403,7 +491,6 @@ def _translate_block_recursive(
             metrics.add_reasons("failure", phase1_failure_reasons)
         else:
             metrics.phase1_success_blocks += 1
-            metrics.add_phase1_risk_flags(phase1_result.risk_flags)
 
     if phase1_result is None:
         signature = _failure_signature(phase1_failure_reasons or ["phase1_structure_failure"])
@@ -449,17 +536,25 @@ def _translate_block_recursive(
 
     style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
     if style_retry_reasons:
+        offending_cue_indices, offending_spans, preferred_actions = _style_retry_feedback(
+            pre_gate,
+            post_gate,
+            style_retry_reasons,
+        )
         strict_phase1 = _run_phase1_style_retry(
             block,
             phase1_result,
             style_retry_reasons,
+            offending_cue_indices,
+            offending_spans,
+            preferred_actions,
             translator,
             glossary_terms,
             metrics,
         )
         if strict_phase1 is not None:
             if metrics:
-                metrics.add_phase1_risk_flags(strict_phase1.risk_flags)
+                metrics.add_strict_retry_candidate_risk_flags(strict_phase1.risk_flags)
             strict_pre = pre_wrap_gate(block, strict_phase1.emitted_cues, glossary_terms, config)
             wrapped_strict = _wrap_phase_result(block, strict_phase1, config, metrics)
             strict_post = post_wrap_gate(wrapped_strict, config)
@@ -480,19 +575,23 @@ def _translate_block_recursive(
                     f"after style warnings {style_retry_reasons}"
                 )
             else:
-                final_result, final_pre, final_post, accepted = _choose_better_candidate(
+                final_result, final_pre, final_post, accepted = _choose_better_style_candidate(
                     final_result,
                     final_pre,
                     final_post,
                     strict_phase1,
                     strict_pre,
                     strict_post,
+                    style_retry_reasons,
                 )
                 if metrics:
                     if accepted:
                         metrics.style_retry_accepted += 1
                     else:
                         metrics.style_retry_rejected += 1
+
+    if metrics:
+        metrics.add_phase1_risk_flags(final_result.risk_flags)
 
     if config.repair_enabled and (final_pre.repair_needed or final_post.repair_needed):
         failure_reasons = _repair_candidate_reasons(block, final_pre, final_post)

@@ -516,6 +516,9 @@ def build_phase1_system_prompt(
                 "On this retry, keep the Korean unfinished whenever the source thought is unfinished.",
                 "It is better to end with a comma, dash, or bare fragment than to add a lecture-style sentence ending that is not supported.",
                 "Do not add a second sentence or clause that only rephrases the first.",
+                "Rewrite only the offending cues or offending spans when possible.",
+                "If preferred_actions include keep_fragment_open, delete unsupported trailing explanation instead of replacing it with another explanatory tail.",
+                "If preferred_actions include delete_repeat, remove the repeated proposition instead of paraphrasing it again.",
                 "Keep unaffected cues as close as possible to the previous anchor-preserving wording.",
             ]
         )
@@ -615,6 +618,9 @@ class OpenAIChatTranslator(BaseTranslator):
                     {"cue_index": cue.cue_index, "text": cue.text}
                     for cue in request.previous_emitted_cues
                 ],
+                "offending_cue_indices": request.offending_cue_indices,
+                "offending_spans": request.offending_spans,
+                "preferred_actions": request.preferred_actions,
             }
         return payload
 

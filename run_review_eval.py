@@ -235,6 +235,7 @@ def main() -> int:
     blocks_by_lecture = None if args.frozen_blocks else _build_dynamic_blocks(review_entries, config)
 
     provenance = {
+        "schema_version": "translated_eval_record_v2",
         "phase1_model": args.model or config.phase1_model,
         "repair_model": args.repair_model or config.repair_model,
         "phase1_temperature": config.phase1_temperature,
@@ -267,6 +268,7 @@ def main() -> int:
             )
             metrics.note_final_cues(translated_cues)
             record = {
+                "schema_version": "translated_eval_record_v2",
                 "id": entry["id"],
                 "lecture": entry["lecture"],
                 "source_file": entry["source_file"],
@@ -301,6 +303,7 @@ def main() -> int:
                     "pre_wrap_failures": metrics.pre_wrap_failures,
                     "post_wrap_failures": metrics.post_wrap_failures,
                     "phase1_risk_flags": dict(metrics.phase1_risk_flags),
+                    "strict_retry_candidate_risk_flags": dict(metrics.strict_retry_candidate_risk_flags),
                     "captured_phase1_risk_flags": sorted(set(tracing_translator.phase1_risk_flags)),
                     "average_cps": round(metrics.average_cps(), 3),
                 },
