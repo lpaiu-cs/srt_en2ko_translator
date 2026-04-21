@@ -70,10 +70,8 @@ def _build_phase_schema(cue_count: int, schema_name: str) -> dict:
     }
 
 
-def _phase1_example_messages(prompt_profile: str) -> List[dict]:
-    if prompt_profile != "fragment_preserving_v1":
-        return []
-    examples = [
+def _phase1_examples_v1() -> List[tuple[dict, dict]]:
+    return [
         (
             {
                 "task": "subtitle_phase1_translate",
@@ -187,14 +185,307 @@ def _phase1_example_messages(prompt_profile: str) -> List[dict]:
             },
         ),
     ]
+
+
+def _phase1_examples_v2() -> List[tuple[dict, dict]]:
+    return [
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["dependent_end"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "그리고 그 학습이 끝나면, 같은 2단계 파이프라인을 따른다는 겁니다.",
+                    "note": "Do not over-close an unfinished fragment with a lecture-style explanation.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 101,
+                        "start": "00:00:01,000",
+                        "end": "00:00:02,400",
+                        "text": "And then once they were done training that,",
+                        "duration_ms": 1400,
+                        "gap_after_ms": 60,
+                    },
+                    {
+                        "cue_index": 102,
+                        "start": "00:00:02,460",
+                        "end": "00:00:04,200",
+                        "text": "you follow the same 2-step pipeline that you saw",
+                        "duration_ms": 1740,
+                        "gap_after_ms": 0,
+                    },
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 101, "text": "그리고 그 학습이 끝나면,"},
+                    {"cue_index": 102, "text": "여러분이 봤던 같은 2단계 파이프라인을 따르고,"},
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["numeric_orphan"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "13% 또는 0.13입니다.",
+                    "note": "Preserve the numeric fragment without adding a sentence-final copula.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 201,
+                        "start": "00:00:04,000",
+                        "end": "00:00:05,000",
+                        "text": "of 13% or 0.13.",
+                        "duration_ms": 1000,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 201, "text": "13% 또는 0.13"}
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["comparison_midstart"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "이는 d_k의 제곱근으로 나눈다는 뜻입니다.",
+                    "note": "A comparison fragment should not invent a full explanatory lead-in.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 251,
+                        "start": "00:00:05,200",
+                        "end": "00:00:06,100",
+                        "text": "like dividing by",
+                        "duration_ms": 900,
+                        "gap_after_ms": 40,
+                    },
+                    {
+                        "cue_index": 252,
+                        "start": "00:00:06,140",
+                        "end": "00:00:07,400",
+                        "text": "the square root of d_k.",
+                        "duration_ms": 1260,
+                        "gap_after_ms": 0,
+                    },
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 251, "text": "예를 들어"},
+                    {"cue_index": 252, "text": "d_k의 제곱근으로 나누는 것처럼요."},
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": ["qa_fragment"],
+                    "lint_actions": ["carry_context_only"],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "네, 맞습니다. 그런 뜻입니다.",
+                    "note": "Keep acknowledgements short instead of expanding them.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 301,
+                        "start": "00:00:06,000",
+                        "end": "00:00:07,000",
+                        "text": "Yeah, yeah.",
+                        "duration_ms": 1000,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 301, "text": "네, 네."}
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": [],
+                    "lint_actions": [],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "하지만 실제로 진전을 이루려면 여기서는 조금 더 구조가 필요합니다. 조금 더 구조가 필요합니다.",
+                    "note": "Do not repeat the same proposition in a second paraphrase.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 401,
+                        "start": "00:00:08,600",
+                        "end": "00:00:11,400",
+                        "text": "But to make progress here, we need a bit more structure.",
+                        "duration_ms": 2800,
+                        "gap_after_ms": 0,
+                    }
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 401, "text": "하지만 여기서 진전을 이루려면 조금 더 구조가 필요합니다."}
+                ],
+                "risk_flags": [],
+            },
+        ),
+        (
+            {
+                "task": "subtitle_phase1_translate",
+                "boundary_lint": {
+                    "lint_flags": [],
+                    "lint_actions": [],
+                },
+                "style_retry": {
+                    "strict_retry": False,
+                    "retry_reasons": [],
+                    "bad_output_to_avoid": "그리고 다시 이미지 해상도로 돌아가는 업샘플링 단계가 있습니다. 이미지 해상도로 돌아가는 단계입니다.",
+                    "note": "Keep one concise proposition instead of repeating the tail.",
+                },
+                "source_cues": [
+                    {
+                        "cue_index": 451,
+                        "start": "00:00:11,500",
+                        "end": "00:00:13,500",
+                        "text": "and then upsampling phase",
+                        "duration_ms": 2000,
+                        "gap_after_ms": 50,
+                    },
+                    {
+                        "cue_index": 452,
+                        "start": "00:00:13,550",
+                        "end": "00:00:15,400",
+                        "text": "that goes back to the image resolution.",
+                        "duration_ms": 1850,
+                        "gap_after_ms": 0,
+                    },
+                ],
+                "left_context": [],
+                "right_context": [],
+                "glossary_terms": [],
+            },
+            {
+                "emitted_cues": [
+                    {"cue_index": 451, "text": "그리고 다시 이미지 해상도로 돌아가는"},
+                    {"cue_index": 452, "text": "업샘플링 단계가 있습니다."},
+                ],
+                "risk_flags": [],
+            },
+        ),
+    ]
+
+
+def _phase1_example_messages(prompt_profile: str, strict_style_retry: bool = False) -> List[dict]:
+    if prompt_profile == "fragment_preserving_v1":
+        examples = _phase1_examples_v1()
+    elif prompt_profile == "fragment_preserving_v2":
+        examples = _phase1_examples_v2()
+    else:
+        return []
     messages: List[dict] = []
     for user_payload, assistant_payload in examples:
         messages.append({"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)})
         messages.append({"role": "assistant", "content": json.dumps(assistant_payload, ensure_ascii=False)})
+    if strict_style_retry and prompt_profile == "fragment_preserving_v2":
+        strict_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": ["dependent_end"],
+                "lint_actions": ["carry_context_only"],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["fragment_overclosure", "duplicate_restatement"],
+                "bad_output_to_avoid": "그리고 그 학습이 끝나면, 여러분이 봤던 같은 2단계 파이프라인을 따른다는 겁니다. 같은 파이프라인을 따르게 되는 거죠.",
+                "note": "On a strict retry, remove both the explanatory closure and the repeated paraphrase.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 501,
+                    "start": "00:00:15,500",
+                    "end": "00:00:16,600",
+                    "text": "And then once they were done training that,",
+                    "duration_ms": 1100,
+                    "gap_after_ms": 40,
+                },
+                {
+                    "cue_index": 502,
+                    "start": "00:00:16,640",
+                    "end": "00:00:18,300",
+                    "text": "you follow the same 2-step pipeline that you saw",
+                    "duration_ms": 1660,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+        }
+        strict_assistant = {
+            "emitted_cues": [
+                {"cue_index": 501, "text": "그리고 그 학습이 끝나면,"},
+                {"cue_index": 502, "text": "여러분이 봤던 같은 2단계 파이프라인을 따르고,"},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_assistant, ensure_ascii=False)})
     return messages
 
 
-def build_phase1_system_prompt(config: RuntimeConfig) -> str:
+def build_phase1_system_prompt(
+    config: RuntimeConfig,
+    strict_style_retry: bool = False,
+    style_retry_reasons: List[str] | None = None,
+) -> str:
     parts = [
         "You are a precise subtitle translator.",
         "Use context only to interpret the current block.",
@@ -217,6 +508,17 @@ def build_phase1_system_prompt(config: RuntimeConfig) -> str:
         "Do not restate the same meaning twice in a second paraphrastic sentence or clause.",
         f"Allowed risk_flags are: {', '.join(RISK_FLAG_ENUM)}.",
     ]
+    if strict_style_retry:
+        retry_reasons = ", ".join(style_retry_reasons or ["style_warning"])
+        parts.extend(
+            [
+                f"This is a strict style retry after style warnings: {retry_reasons}.",
+                "On this retry, keep the Korean unfinished whenever the source thought is unfinished.",
+                "It is better to end with a comma, dash, or bare fragment than to add a lecture-style sentence ending that is not supported.",
+                "Do not add a second sentence or clause that only rephrases the first.",
+                "Keep unaffected cues as close as possible to the previous anchor-preserving wording.",
+            ]
+        )
     if config.translation_context:
         parts.append(f"Context: {compact_spaces(config.translation_context)}")
     if config.translation_style:
@@ -275,12 +577,13 @@ class OpenAIChatTranslator(BaseTranslator):
         self.phase1_system_prompt = build_phase1_system_prompt(config)
         self.repair_system_prompt = build_repair_system_prompt(config)
         self.phase1_example_messages = _phase1_example_messages(config.phase1_prompt_profile)
+        self.phase1_strict_example_messages = _phase1_example_messages(config.phase1_prompt_profile, strict_style_retry=True)
         self.session = requests.Session()
 
     def _payload_for_phase1(self, request: TranslationRequest) -> dict:
         block = request.block
         cues = block.cues
-        return {
+        payload = {
             "task": "subtitle_phase1_translate",
             "boundary_lint": {
                 "lint_flags": block.lint_reasons,
@@ -304,6 +607,16 @@ class OpenAIChatTranslator(BaseTranslator):
                 for term in request.glossary_terms
             ],
         }
+        if request.strict_style_retry:
+            payload["style_retry"] = {
+                "strict_retry": True,
+                "retry_reasons": request.style_retry_reasons,
+                "previous_emitted_cues": [
+                    {"cue_index": cue.cue_index, "text": cue.text}
+                    for cue in request.previous_emitted_cues
+                ],
+            }
+        return payload
 
     def _payload_for_repair(self, request: RepairRequest) -> dict:
         block = request.block
@@ -384,14 +697,23 @@ class OpenAIChatTranslator(BaseTranslator):
         return PhaseTranslationResult(emitted_cues=emitted_cues, risk_flags=list(dict.fromkeys(risk_flags)))
 
     def translate_block(self, request: TranslationRequest) -> PhaseTranslationResult:
+        strict_style_retry = request.strict_style_retry
         return self._structured_completion(
             model=self.phase1_model,
-            system_prompt=self.phase1_system_prompt,
+            system_prompt=(
+                build_phase1_system_prompt(
+                    self.config,
+                    strict_style_retry=True,
+                    style_retry_reasons=request.style_retry_reasons,
+                )
+                if strict_style_retry
+                else self.phase1_system_prompt
+            ),
             payload=self._payload_for_phase1(request),
             cue_count=len(request.block.cues),
-            schema_name="subtitle_phase1",
-            temperature=self.config.phase1_temperature,
-            example_messages=self.phase1_example_messages,
+            schema_name="subtitle_phase1_strict" if strict_style_retry else "subtitle_phase1",
+            temperature=0.0 if strict_style_retry else self.config.phase1_temperature,
+            example_messages=self.phase1_strict_example_messages if strict_style_retry else self.phase1_example_messages,
         )
 
     def repair_block(self, request: RepairRequest) -> PhaseTranslationResult:

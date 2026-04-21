@@ -53,7 +53,7 @@ python3 -m pip install requests
 - `SRT_OPENAI_MODEL`: backward-compatible alias for `SRT_PHASE1_MODEL`.
 - `SRT_REPAIR_MODEL`: default Phase2 repair model. Defaults to `gpt-4o`.
 - `SRT_PHASE1_TEMPERATURE`, `SRT_REPAIR_TEMPERATURE`: generation temperatures. For eval A/B runs, `0.0` reduces comparison noise.
-- `SRT_PHASE1_PROMPT_PROFILE`: Phase1 prompt/example profile. Defaults to `fragment_preserving_v1`.
+- `SRT_PHASE1_PROMPT_PROFILE`: Phase1 prompt/example profile. Defaults to `fragment_preserving_v2`. Keep `fragment_preserving_v1` for frozen baseline comparisons.
 - `SRT_TRANSLATION_CONTEXT`: optional domain/context hint.
 - `SRT_TRANSLATION_STYLE`: optional tone/style hint.
 - `SRT_USE_CONTEXT_WINDOW`: whether to provide left/right source context.
@@ -72,7 +72,7 @@ python3 -m pip install requests
 The old hard-coded lecture preset is now expressed through `.env`:
 
 - `SRT_TRANSLATION_CONTEXT=These subtitles are the Stanford CS231n lecture on computer vision and deep learning.`
-- `SRT_TRANSLATION_STYLE=Translate in a spoken lecture style for Korean subtitles. Use polite Korean sentence endings consistently (e.g. 습니다체; '~입니다', '~할 수 있습니다'). Preserve unfinished fragments when the source is unfinished, and do not add generic explanatory endings that are not directly supported by the source.`
+- `SRT_TRANSLATION_STYLE=Translate in a spoken lecture style for Korean subtitles. Use polite sentence-final endings only when the source thought is actually complete. For unfinished fragments, incomplete clauses, or carry-context blocks, non-final fragment endings are acceptable and preferred. Do not add generic explanatory endings that are not directly supported by the source.`
 
 ## Single File Usage
 
@@ -112,7 +112,7 @@ python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jso
 For prompt A/B runs, freeze the original block boundaries and lower Phase1 temperature:
 
 ```bash
-python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v1
+python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v2
 ```
 
 The translated eval JSONL records provenance (`phase1_model`, `repair_model`, temperatures, `prompt_profile`, `git_sha`) together with block lint state and captured Phase1 risk flags. Current manual review tags are centered on translation behavior rather than the older grouping-only pass:

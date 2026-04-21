@@ -20,6 +20,9 @@ class TranslationMetrics:
     repair_invocations: int = 0
     repair_accepted: int = 0
     repair_rejected: int = 0
+    style_retry_invocations: int = 0
+    style_retry_accepted: int = 0
+    style_retry_rejected: int = 0
     local_rewrap_attempts: int = 0
     local_rewrap_successes: int = 0
     smaller_block_fallbacks: int = 0
@@ -82,6 +85,8 @@ class TranslationMetrics:
             "phase1_retry_rate": self.phase1_retry_blocks / blocks,
             "repair_invocation_rate": self.repair_invocations / blocks,
             "repair_success_rate": self.repair_accepted / repairs,
+            "style_retry_invocation_rate": self.style_retry_invocations / blocks,
+            "style_retry_success_rate": self.style_retry_accepted / max(self.style_retry_invocations, 1),
             "smaller_block_fallback_rate": self.smaller_block_fallbacks / blocks,
             "single_cue_fallback_rate": self.single_cue_source_fallbacks / blocks,
             "post_wrap_failure_rate": self.post_wrap_failure_blocks / blocks,
@@ -100,6 +105,7 @@ class TranslationMetrics:
         return (
             f"blocks={self.blocks_started} phase1_retry_rate={self.phase1_retry_blocks / blocks:.2%} "
             f"repair_rate={self.repair_invocations / blocks:.2%} repair_success={self.repair_accepted}/{self.repair_invocations} "
+            f"style_retry_success={self.style_retry_accepted}/{self.style_retry_invocations} "
             f"fallback_rate={self.smaller_block_fallbacks / blocks:.2%} avg_cps={self.average_cps():.2f}"
         )
 

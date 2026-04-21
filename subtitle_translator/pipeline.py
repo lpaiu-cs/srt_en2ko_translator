@@ -35,6 +35,16 @@ BOUNDARY_SENSITIVE_REPAIR_REASONS = {
     "identifier_anchor_loss",
 }
 
+STYLE_WARNING_REASONS = {
+    "fragment_overclosure",
+    "duplicate_restatement",
+}
+
+STYLE_RISK_TO_REASON = {
+    "fragment_overclosure_risk": "fragment_overclosure",
+    "duplicate_restatement_risk": "duplicate_restatement",
+}
+
 
 def create_glossary_store(config: RuntimeConfig, glossary_log_path: Optional[str] = None) -> GlossaryStore:
     path = Path(glossary_log_path).expanduser() if glossary_log_path is not None else config.glossary_log_path
@@ -131,6 +141,23 @@ def _repair_candidate_reasons(
     if "carry_context_only" in block.lint_actions:
         blocked.update(BOUNDARY_SENSITIVE_REPAIR_REASONS)
     return [reason for reason in reasons if reason not in blocked]
+
+
+def _style_retry_candidate_reasons(
+    phase1_result: PhaseTranslationResult,
+    pre_gate,
+    post_gate,
+) -> List[str]:
+    reasons: List[str] = []
+    warning_set = set(pre_gate.warning_reasons + post_gate.warning_reasons)
+    for reason in STYLE_WARNING_REASONS:
+        if reason in warning_set:
+            reasons.append(reason)
+    for risk_flag in phase1_result.risk_flags:
+        mapped = STYLE_RISK_TO_REASON.get(risk_flag)
+        if mapped and mapped not in reasons:
+            reasons.append(mapped)
+    return reasons
 
 
 def _glossary_terms_for_block(block: TranslationBlock, glossary_store: Optional[GlossaryStore]) -> list:
@@ -250,6 +277,43 @@ def _run_phase2_repair(
     return None
 
 
+def _run_phase1_style_retry(
+    block: TranslationBlock,
+    phase1_result: PhaseTranslationResult,
+    style_retry_reasons: List[str],
+    translator: BaseTranslator,
+    glossary_terms: list,
+    metrics: Optional[TranslationMetrics],
+) -> Optional[PhaseTranslationResult]:
+    if metrics:
+        metrics.style_retry_invocations += 1
+    request = TranslationRequest(
+        block=block,
+        glossary_terms=glossary_terms,
+        strict_style_retry=True,
+        style_retry_reasons=style_retry_reasons,
+        previous_emitted_cues=phase1_result.emitted_cues,
+    )
+    try:
+        retried = translator.translate_block(request)
+    except Exception as exc:
+        warn(
+            f"Strict Phase1 retry failed for cues {[cue.index for cue in block.cues]} "
+            f"after style warnings {style_retry_reasons}: {exc}"
+        )
+        return None
+
+    validation = validate_phase_structure(block, retried.emitted_cues)
+    if validation.valid:
+        return retried
+
+    warn(
+        f"Strict Phase1 retry returned invalid structure for cues {[cue.index for cue in block.cues]}: "
+        f"{', '.join(validation.reasons)}"
+    )
+    return None
+
+
 def _changed_chars(left: str, right: str) -> int:
     matcher = SequenceMatcher(a=left, b=right)
     total = 0
@@ -272,7 +336,7 @@ def _repair_change_stats(current: PhaseTranslationResult, candidate: PhaseTransl
     return changed_cues, changed_chars
 
 
-def _repair_is_overedited(
+def _candidate_is_overedited(
     block: TranslationBlock,
     current_result: PhaseTranslationResult,
     current_pre,
@@ -383,20 +447,67 @@ def _translate_block_recursive(
     final_pre = pre_gate
     final_post = post_gate
 
-    if config.repair_enabled and (pre_gate.repair_needed or post_gate.repair_needed):
-        failure_reasons = _repair_candidate_reasons(block, pre_gate, post_gate)
-        repaired = None
-        if failure_reasons:
-            repaired = _run_phase2_repair(block, phase1_result, failure_reasons, translator, glossary_terms, config, metrics)
-        if repaired is not None:
-            repaired_pre = pre_wrap_gate(block, repaired.emitted_cues, glossary_terms, config)
-            wrapped_repaired = _wrap_phase_result(block, repaired, config, metrics)
-            repaired_post = post_wrap_gate(wrapped_repaired, config)
-            if _repair_is_overedited(
+    style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
+    if style_retry_reasons:
+        strict_phase1 = _run_phase1_style_retry(
+            block,
+            phase1_result,
+            style_retry_reasons,
+            translator,
+            glossary_terms,
+            metrics,
+        )
+        if strict_phase1 is not None:
+            if metrics:
+                metrics.add_phase1_risk_flags(strict_phase1.risk_flags)
+            strict_pre = pre_wrap_gate(block, strict_phase1.emitted_cues, glossary_terms, config)
+            wrapped_strict = _wrap_phase_result(block, strict_phase1, config, metrics)
+            strict_post = post_wrap_gate(wrapped_strict, config)
+            if _candidate_is_overedited(
                 block,
                 phase1_result,
                 pre_gate,
                 post_gate,
+                strict_phase1,
+                strict_pre,
+                strict_post,
+                style_retry_reasons,
+            ):
+                if metrics:
+                    metrics.style_retry_rejected += 1
+                warn(
+                    f"Rejected strict style retry for cues {[cue.index for cue in block.cues]} "
+                    f"after style warnings {style_retry_reasons}"
+                )
+            else:
+                final_result, final_pre, final_post, accepted = _choose_better_candidate(
+                    final_result,
+                    final_pre,
+                    final_post,
+                    strict_phase1,
+                    strict_pre,
+                    strict_post,
+                )
+                if metrics:
+                    if accepted:
+                        metrics.style_retry_accepted += 1
+                    else:
+                        metrics.style_retry_rejected += 1
+
+    if config.repair_enabled and (final_pre.repair_needed or final_post.repair_needed):
+        failure_reasons = _repair_candidate_reasons(block, final_pre, final_post)
+        repaired = None
+        if failure_reasons:
+            repaired = _run_phase2_repair(block, final_result, failure_reasons, translator, glossary_terms, config, metrics)
+        if repaired is not None:
+            repaired_pre = pre_wrap_gate(block, repaired.emitted_cues, glossary_terms, config)
+            wrapped_repaired = _wrap_phase_result(block, repaired, config, metrics)
+            repaired_post = post_wrap_gate(wrapped_repaired, config)
+            if _candidate_is_overedited(
+                block,
+                final_result,
+                final_pre,
+                final_post,
                 repaired,
                 repaired_pre,
                 repaired_post,
@@ -410,9 +521,9 @@ def _translate_block_recursive(
                 )
             else:
                 final_result, final_pre, final_post, accepted = _choose_better_candidate(
-                    phase1_result,
-                    pre_gate,
-                    post_gate,
+                    final_result,
+                    final_pre,
+                    final_post,
                     repaired,
                     repaired_pre,
                     repaired_post,

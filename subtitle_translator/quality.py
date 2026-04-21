@@ -18,7 +18,9 @@ _PARTICLE_ONLY_RE = re.compile(
     r"^(은|는|이|가|을|를|에|의|도|만|와|과|로|으로|에서|부터|까지|보다|처럼|하고|및|또는|그리고|하지만|입니다|합니다|죠|겁니다)$"
 )
 _SENTENCE_END_RE = re.compile(r"(입니다|합니다|됩니다|거죠|겁니다|있습니다|없습니다|했다|한다|했다는|means\.?)$")
-_EXPLANATORY_CLOSER_RE = re.compile(r"(라는 뜻입니다|거죠|겁니다|라고 볼 수 있습니다|라고 할 수 있습니다)$")
+_EXPLANATORY_CLOSER_RE = re.compile(
+    r"(라는 뜻입니다|거죠|겁니다|라고 볼 수 있습니다|라고 할 수 있습니다)(?:[\"'”’),，、\s]*)$"
+)
 _RESTATEMENT_MARKER_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\b")
 
 

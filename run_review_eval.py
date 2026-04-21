@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt-profile",
         default=None,
-        help="Override Phase1 prompt profile (for example: fragment_preserving_v1)",
+        help="Override Phase1 prompt profile (for example: fragment_preserving_v2)",
     )
     parser.add_argument(
         "--frozen-blocks",
@@ -288,6 +288,9 @@ def main() -> int:
                 },
                 "pipeline_signals": {
                     "phase1_retried": metrics.phase1_retry_blocks > 0,
+                    "style_retry_invoked": metrics.style_retry_invocations > 0,
+                    "style_retry_accepted": metrics.style_retry_accepted > 0,
+                    "style_retry_rejected": metrics.style_retry_rejected > 0,
                     "repair_invoked": metrics.repair_invocations > 0,
                     "repair_accepted": metrics.repair_accepted > 0,
                     "repair_rejected": metrics.repair_rejected > 0,

@@ -62,7 +62,7 @@ python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jso
 Frozen-block prompt A/B replay:
 
 ```bash
-python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v1
+python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v2
 ```
 
 Use frozen-block mode when the variable under test is prompt/profile/model behavior rather than block-boundary changes.

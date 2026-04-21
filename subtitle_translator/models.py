@@ -46,6 +46,9 @@ class TranslationBlock:
 class TranslationRequest:
     block: TranslationBlock
     glossary_terms: List[GlossaryEntry] = field(default_factory=list)
+    strict_style_retry: bool = False
+    style_retry_reasons: List[str] = field(default_factory=list)
+    previous_emitted_cues: List[EmittedCue] = field(default_factory=list)
 
 
 @dataclass
