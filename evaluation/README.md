@@ -33,6 +33,7 @@ Action-oriented replay JSONL also includes:
 
 - `pipeline_signals.style_action_*`: aggregate action counts.
 - `pipeline_signals.style_action_*_by_channel`: the same counts split into `micro_edit` and `strict_retry`.
+- `pipeline_signals.style_action_accept_modes*`: whether a strict-retry acceptance was direct or salvaged by post-normalization.
 
 ## Review Tags
 
@@ -100,6 +101,7 @@ python3 build_restore_tail_replay_set.py \
 ```
 
 This replay set is not a coverage set. It is meant to benchmark actual `restore_missing_tail` selector decisions with preserved offending/protected cue metadata.
+Each replay row also keeps a `replay_trace` snapshot with offending/protected cue ids, base Phase1 offending cue text, raw strict candidate text, post-normalization edits, final offending cue text, and accept/reject outcome.
 
 For larger frozen evals where synchronous rate limits add noise, use the Batch lane:
 

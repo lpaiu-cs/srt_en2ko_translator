@@ -879,6 +879,10 @@ def _offending_cue_diffs(
     return diffs
 
 
+def _strict_accept_mode(post_normalizations: Sequence[dict]) -> str:
+    return "postnorm_salvaged_accept" if post_normalizations else "strict_direct_accept"
+
+
 def _translate_block_recursive(
     block: TranslationBlock,
     translator: BaseTranslator,
@@ -1042,11 +1046,13 @@ def _translate_block_recursive(
                 metrics,
             )
             if strict_phase1 is not None:
+                raw_strict_phase1 = strict_phase1
                 strict_phase1, strict_post_normalizations = _apply_purpose_tail_post_normalization(
                     strict_phase1,
                     offending_spans,
                 )
                 if metrics:
+                    metrics.style_retry_trace["strict_candidate_raw_emitted_cues"] = _serialize_emitted_cues(raw_strict_phase1)
                     metrics.style_retry_trace["strict_candidate_emitted_cues"] = _serialize_emitted_cues(strict_phase1)
                     metrics.style_retry_trace["strict_candidate_risk_flags"] = list(strict_phase1.risk_flags)
                     metrics.style_retry_trace["strict_candidate_post_normalizations"] = list(strict_post_normalizations)
@@ -1073,6 +1079,7 @@ def _translate_block_recursive(
                         f"after style warnings {style_retry_reasons}"
                     )
                     if metrics.style_retry_trace:
+                        metrics.style_retry_trace["accept_mode"] = None
                         metrics.style_retry_trace["rejection_causes"] = ["overedited_candidate"]
                 else:
                     final_result, final_pre, final_post, accepted, rejection_causes = _choose_better_style_candidate(
@@ -1091,24 +1098,32 @@ def _translate_block_recursive(
                         if accepted:
                             metrics.style_retry_accepted += 1
                             metrics.add_strict_retry_candidate_risk_flags(strict_phase1.risk_flags)
+                            accept_mode = _strict_accept_mode(strict_post_normalizations)
+                            metrics.note_style_action_accept_mode(offending_spans, accept_mode, channel="strict_retry")
+                            metrics.style_retry_trace["accept_mode"] = accept_mode
                         else:
                             metrics.style_retry_rejected += 1
                             metrics.add_style_retry_rejection_causes(rejection_causes)
+                            metrics.style_retry_trace["accept_mode"] = None
                         metrics.style_retry_trace["accepted"] = accepted
                         metrics.style_retry_trace["rejection_causes"] = rejection_causes
             elif metrics:
                 metrics.style_retry_rejected += 1
                 metrics.note_style_action_outcome(offending_spans, False, channel="strict_retry")
+                metrics.style_retry_trace["strict_candidate_raw_emitted_cues"] = []
                 metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
                 metrics.style_retry_trace["strict_candidate_risk_flags"] = []
                 metrics.style_retry_trace["strict_candidate_post_normalizations"] = []
+                metrics.style_retry_trace["accept_mode"] = None
                 metrics.style_retry_trace["accepted"] = False
                 metrics.style_retry_trace["rejection_causes"] = list(strict_retry_failures)
                 metrics.add_style_retry_rejection_causes(strict_retry_failures)
         elif metrics:
+            metrics.style_retry_trace["strict_candidate_raw_emitted_cues"] = []
             metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
             metrics.style_retry_trace["strict_candidate_risk_flags"] = []
             metrics.style_retry_trace["strict_candidate_post_normalizations"] = []
+            metrics.style_retry_trace["accept_mode"] = None
             metrics.style_retry_trace["accepted"] = False
             metrics.style_retry_trace["rejection_causes"] = ["resolved_by_micro_edit"]
 

@@ -41,6 +41,8 @@ class TranslationMetrics:
     style_action_tail_attempts: Dict[str, int] = field(default_factory=dict)
     style_action_tail_accepts: Dict[str, int] = field(default_factory=dict)
     style_action_tail_rejections: Dict[str, int] = field(default_factory=dict)
+    style_action_accept_modes: Dict[str, int] = field(default_factory=dict)
+    style_action_tail_accept_modes: Dict[str, int] = field(default_factory=dict)
     style_action_attempts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_action_accepts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_action_rejections_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
@@ -48,6 +50,8 @@ class TranslationMetrics:
     style_action_tail_attempts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_action_tail_accepts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_action_tail_rejections_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_accept_modes_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_tail_accept_modes_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_retry_trace: Dict[str, Any] = field(default_factory=dict)
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
@@ -140,6 +144,27 @@ class TranslationMetrics:
             if channel:
                 self._bump_channel_counter(self.style_action_remaining_warnings_by_channel, channel, action)
 
+    def note_style_action_accept_mode(
+        self,
+        spans: Iterable[Dict[str, Any]],
+        accept_mode: str,
+        channel: str | None = None,
+    ) -> None:
+        for span in spans:
+            action = span.get("preferred_action")
+            if not action or not accept_mode:
+                continue
+            key = f"{action}|{accept_mode}"
+            self.style_action_accept_modes[key] = self.style_action_accept_modes.get(key, 0) + 1
+            if channel:
+                self._bump_channel_counter(self.style_action_accept_modes_by_channel, channel, key)
+            tail_type = span.get("source_tail_type")
+            if tail_type:
+                tail_key = f"{action}|{tail_type}|{accept_mode}"
+                self.style_action_tail_accept_modes[tail_key] = self.style_action_tail_accept_modes.get(tail_key, 0) + 1
+                if channel:
+                    self._bump_channel_counter(self.style_action_tail_accept_modes_by_channel, channel, tail_key)
+
     def average_cps(self) -> float:
         if self.final_cue_count == 0:
             return 0.0
@@ -181,6 +206,8 @@ class TranslationMetrics:
             "style_action_tail_attempts": self.style_action_tail_attempts,
             "style_action_tail_accepts": self.style_action_tail_accepts,
             "style_action_tail_rejections": self.style_action_tail_rejections,
+            "style_action_accept_modes": self.style_action_accept_modes,
+            "style_action_tail_accept_modes": self.style_action_tail_accept_modes,
             "style_action_attempts_by_channel": self.style_action_attempts_by_channel,
             "style_action_accepts_by_channel": self.style_action_accepts_by_channel,
             "style_action_rejections_by_channel": self.style_action_rejections_by_channel,
@@ -188,6 +215,8 @@ class TranslationMetrics:
             "style_action_tail_attempts_by_channel": self.style_action_tail_attempts_by_channel,
             "style_action_tail_accepts_by_channel": self.style_action_tail_accepts_by_channel,
             "style_action_tail_rejections_by_channel": self.style_action_tail_rejections_by_channel,
+            "style_action_accept_modes_by_channel": self.style_action_accept_modes_by_channel,
+            "style_action_tail_accept_modes_by_channel": self.style_action_tail_accept_modes_by_channel,
         }
 
     def summary(self) -> str:

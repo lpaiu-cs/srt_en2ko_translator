@@ -67,6 +67,35 @@ def _trace_quality_score(row: dict, trace: dict, tail_type: str) -> tuple[int, i
     )
 
 
+def _cue_text_map(cues: List[dict]) -> Dict[int, str]:
+    return {
+        int(cue.get("cue_index")): str(cue.get("text", ""))
+        for cue in cues
+        if isinstance(cue.get("cue_index"), int)
+    }
+
+
+def _select_cue_texts(cues: List[dict], cue_indices: Iterable[int]) -> Dict[int, str]:
+    cue_map = _cue_text_map(cues)
+    return {cue_index: cue_map.get(cue_index, "") for cue_index in cue_indices}
+
+
+def _replay_trace(row: dict, trace: dict) -> dict:
+    offending_cue_indices = list(trace.get("offending_cue_indices", []))
+    return {
+        "offending_cue_indices": offending_cue_indices,
+        "protected_cue_indices": list(trace.get("protected_cue_indices", [])),
+        "offending_spans": list(trace.get("offending_spans", [])),
+        "accept_mode": trace.get("accept_mode"),
+        "rejection_causes": list(trace.get("rejection_causes", [])),
+        "base_phase1_offending_cues": _select_cue_texts(trace.get("base_phase1_emitted_cues", []), offending_cue_indices),
+        "strict_candidate_raw_offending_cues": _select_cue_texts(trace.get("strict_candidate_raw_emitted_cues", []), offending_cue_indices),
+        "strict_candidate_offending_cues": _select_cue_texts(trace.get("strict_candidate_emitted_cues", []), offending_cue_indices),
+        "strict_candidate_post_normalizations": list(trace.get("strict_candidate_post_normalizations", [])),
+        "final_offending_cues": _select_cue_texts(trace.get("final_emitted_cues", []), offending_cue_indices),
+    }
+
+
 def select_rows(rows: Iterable[dict], max_per_tail_type: int, max_total: int | None) -> List[dict]:
     best_by_id: Dict[str, tuple[tuple[int, int, int, int], int, dict]] = {}
     for order, row in enumerate(rows):
@@ -80,6 +109,7 @@ def select_rows(rows: Iterable[dict], max_per_tail_type: int, max_total: int | N
             "source_tail_type": tail_type,
             "style_retry_outcome": _outcome(row),
         }
+        enriched["replay_trace"] = _replay_trace(row, trace)
         score = _trace_quality_score(row, trace, tail_type)
         current = best_by_id.get(row["id"])
         if current is None or score > current[0] or (score == current[0] and order > current[1]):

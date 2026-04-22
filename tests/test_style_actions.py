@@ -185,6 +185,38 @@ class StyleActionTests(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertEqual(rejection_causes, [])
 
+    def test_purpose_tail_post_normalization_handles_variants_and_punctuation(self) -> None:
+        offending_spans = [
+            {
+                "cue_index": 11,
+                "source_tail_type": "purpose_tail",
+                "preferred_action": "restore_missing_tail",
+            }
+        ]
+        candidate = PhaseTranslationResult(
+            emitted_cues=[EmittedCue(cue_index=11, text="메모리를 절약하기 위한 것입니다,")],
+            risk_flags=[],
+        )
+        normalized, applied = _apply_purpose_tail_post_normalization(candidate, offending_spans)
+        self.assertEqual(normalized.emitted_cues[0].text, "메모리를 절약하기 위해")
+        self.assertEqual(applied[0]["after"], "메모리를 절약하기 위해")
+
+    def test_purpose_tail_post_normalization_keeps_existing_fragment(self) -> None:
+        offending_spans = [
+            {
+                "cue_index": 11,
+                "source_tail_type": "purpose_tail",
+                "preferred_action": "restore_missing_tail",
+            }
+        ]
+        candidate = PhaseTranslationResult(
+            emitted_cues=[EmittedCue(cue_index=11, text="실제로 진전을 이루기 위해")],
+            risk_flags=[],
+        )
+        normalized, applied = _apply_purpose_tail_post_normalization(candidate, offending_spans)
+        self.assertEqual(normalized.emitted_cues[0].text, "실제로 진전을 이루기 위해")
+        self.assertEqual(applied, [])
+
     def test_restore_missing_tail_rejects_purpose_tail_without_purpose_marker(self) -> None:
         block = TranslationBlock(
             cues=[

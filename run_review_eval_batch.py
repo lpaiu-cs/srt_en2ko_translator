@@ -29,6 +29,7 @@ from subtitle_translator.pipeline import (
     _offending_cue_diffs,
     _protected_cue_indices_for_spans,
     _serialize_emitted_cues,
+    _strict_accept_mode,
     _style_spans_for_actions,
     _style_warning_action_details,
     _style_retry_candidate_reasons,
@@ -241,6 +242,22 @@ def _style_action_counter(spans: List[dict]) -> tuple[Dict[str, int], Dict[str, 
         if tail_type:
             keyed = f"{action}|{tail_type}"
             tail_counts[keyed] = tail_counts.get(keyed, 0) + 1
+    return action_counts, tail_counts
+
+
+def _style_action_counter_with_accept_mode(spans: List[dict], accept_mode: str) -> tuple[Dict[str, int], Dict[str, int]]:
+    action_counts: Dict[str, int] = {}
+    tail_counts: Dict[str, int] = {}
+    for span in spans:
+        action = span.get("preferred_action")
+        if not action:
+            continue
+        action_key = f"{action}|{accept_mode}"
+        action_counts[action_key] = action_counts.get(action_key, 0) + 1
+        tail_type = span.get("source_tail_type")
+        if tail_type:
+            tail_key = f"{action}|{tail_type}|{accept_mode}"
+            tail_counts[tail_key] = tail_counts.get(tail_key, 0) + 1
     return action_counts, tail_counts
 
 
@@ -587,14 +604,17 @@ def cmd_finalize(args) -> int:
                     strict_result, strict_errors = _parse_batch_phase_result(translator, strict_outputs.get(row["strict_custom_id"]))
                     if strict_result is None:
                         style_retry_rejected = True
+                        style_retry_trace["strict_candidate_raw_emitted_cues"] = []
                         style_retry_trace["strict_candidate_emitted_cues"] = []
                         style_retry_trace["strict_candidate_risk_flags"] = []
                         style_retry_trace["strict_candidate_post_normalizations"] = []
+                        style_retry_trace["accept_mode"] = None
                         style_retry_trace["accepted"] = False
                         style_retry_trace["rejection_causes"] = list(strict_errors)
                         for cause in strict_errors:
                             style_retry_rejection_causes[cause] = style_retry_rejection_causes.get(cause, 0) + 1
                     else:
+                        style_retry_trace["strict_candidate_raw_emitted_cues"] = _serialize_emitted_cues(strict_result)
                         strict_result, strict_post_normalizations = _apply_purpose_tail_post_normalization(
                             strict_result,
                             row.get("offending_spans", []),
@@ -606,6 +626,7 @@ def cmd_finalize(args) -> int:
                         if not strict_validation.valid:
                             rejection_causes = [f"strict_retry_{reason}" for reason in strict_validation.reasons]
                             style_retry_rejected = True
+                            style_retry_trace["accept_mode"] = None
                             style_retry_trace["accepted"] = False
                             style_retry_trace["rejection_causes"] = rejection_causes
                             for cause in rejection_causes:
@@ -626,6 +647,7 @@ def cmd_finalize(args) -> int:
                             ):
                                 rejection_causes = ["overedited_candidate"]
                                 style_retry_rejected = True
+                                style_retry_trace["accept_mode"] = None
                                 style_retry_trace["accepted"] = False
                                 style_retry_trace["rejection_causes"] = rejection_causes
                                 style_retry_trace["strict_candidate_emitted_cues"] = _serialize_emitted_cues(strict_result)
@@ -643,12 +665,13 @@ def cmd_finalize(args) -> int:
                                     row.get("protected_cue_indices", []),
                                     offending_spans=row.get("offending_spans", []),
                                 )
-                                style_retry_accepted = accepted
-                                style_retry_rejected = not accepted
-                                style_retry_trace["accepted"] = accepted
-                                style_retry_trace["rejection_causes"] = rejection_causes
-                                for cause in rejection_causes:
-                                    style_retry_rejection_causes[cause] = style_retry_rejection_causes.get(cause, 0) + 1
+                            style_retry_accepted = accepted
+                            style_retry_rejected = not accepted
+                            style_retry_trace["accepted"] = accepted
+                            style_retry_trace["accept_mode"] = _strict_accept_mode(strict_post_normalizations) if accepted else None
+                            style_retry_trace["rejection_causes"] = rejection_causes
+                            for cause in rejection_causes:
+                                style_retry_rejection_causes[cause] = style_retry_rejection_causes.get(cause, 0) + 1
 
                 style_retry_trace["final_emitted_cues"] = _serialize_emitted_cues(final_result)
                 style_retry_trace["final_risk_flags"] = list(final_result.risk_flags)
@@ -669,6 +692,8 @@ def cmd_finalize(args) -> int:
             style_action_tail_attempts: Dict[str, int] = {}
             style_action_tail_accepts: Dict[str, int] = {}
             style_action_tail_rejections: Dict[str, int] = {}
+            style_action_accept_modes: Dict[str, int] = {}
+            style_action_tail_accept_modes: Dict[str, int] = {}
             style_action_attempts_by_channel: Dict[str, Dict[str, int]] = {}
             style_action_accepts_by_channel: Dict[str, Dict[str, int]] = {}
             style_action_rejections_by_channel: Dict[str, Dict[str, int]] = {}
@@ -676,6 +701,8 @@ def cmd_finalize(args) -> int:
             style_action_tail_attempts_by_channel: Dict[str, Dict[str, int]] = {}
             style_action_tail_accepts_by_channel: Dict[str, Dict[str, int]] = {}
             style_action_tail_rejections_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_accept_modes_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_tail_accept_modes_by_channel: Dict[str, Dict[str, int]] = {}
 
             def merge_counts(target: Dict[str, int], source: Dict[str, int]) -> None:
                 for key, value in source.items():
@@ -685,6 +712,15 @@ def cmd_finalize(args) -> int:
                 per_channel = target.setdefault(channel, {})
                 for key, value in source.items():
                     per_channel[key] = per_channel.get(key, 0) + value
+
+            def merge_accept_mode_counts(spans: List[dict], accept_mode: str, channel: str) -> None:
+                if not accept_mode:
+                    return
+                action_counts, tail_counts = _style_action_counter_with_accept_mode(spans, accept_mode)
+                merge_counts(style_action_accept_modes, action_counts)
+                merge_counts(style_action_tail_accept_modes, tail_counts)
+                merge_channel_counts(style_action_accept_modes_by_channel, channel, action_counts)
+                merge_channel_counts(style_action_tail_accept_modes_by_channel, channel, tail_counts)
 
             micro_trace = row.get("micro_edit_trace", {})
             micro_attempts, micro_tail_attempts = _style_action_counter(micro_trace.get("spans", []))
@@ -715,6 +751,7 @@ def cmd_finalize(args) -> int:
                     merge_counts(style_action_tail_accepts, strict_tail_attempts)
                     merge_channel_counts(style_action_accepts_by_channel, "strict_retry", strict_attempts)
                     merge_channel_counts(style_action_tail_accepts_by_channel, "strict_retry", strict_tail_attempts)
+                    merge_accept_mode_counts(row.get("offending_spans", []), style_retry_trace.get("accept_mode"), "strict_retry")
                 else:
                     merge_counts(style_action_rejections, strict_attempts)
                     merge_counts(style_action_tail_rejections, strict_tail_attempts)
@@ -777,6 +814,8 @@ def cmd_finalize(args) -> int:
                     "style_action_tail_attempts": style_action_tail_attempts,
                     "style_action_tail_accepts": style_action_tail_accepts,
                     "style_action_tail_rejections": style_action_tail_rejections,
+                    "style_action_accept_modes": style_action_accept_modes,
+                    "style_action_tail_accept_modes": style_action_tail_accept_modes,
                     "style_action_attempts_by_channel": style_action_attempts_by_channel,
                     "style_action_accepts_by_channel": style_action_accepts_by_channel,
                     "style_action_rejections_by_channel": style_action_rejections_by_channel,
@@ -784,6 +823,8 @@ def cmd_finalize(args) -> int:
                     "style_action_tail_attempts_by_channel": style_action_tail_attempts_by_channel,
                     "style_action_tail_accepts_by_channel": style_action_tail_accepts_by_channel,
                     "style_action_tail_rejections_by_channel": style_action_tail_rejections_by_channel,
+                    "style_action_accept_modes_by_channel": style_action_accept_modes_by_channel,
+                    "style_action_tail_accept_modes_by_channel": style_action_tail_accept_modes_by_channel,
                     "captured_phase1_risk_flags": list(row.get("phase1_result", {}).get("risk_flags", [])) if row.get("phase1_result") else [],
                     "average_cps": round(_average_cps(wrapped_final), 3),
                     "style_retry_trace": style_retry_trace,
