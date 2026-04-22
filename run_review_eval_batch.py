@@ -21,11 +21,15 @@ from subtitle_translator import (
 )
 from subtitle_translator.openai_batch import OpenAIBatchClient, parse_batch_output_line
 from subtitle_translator.pipeline import (
+    _apply_deterministic_style_micro_edits,
     _candidate_is_overedited,
     _choose_better_style_candidate,
     _fallback_source_result,
     _offending_cue_diffs,
+    _protected_cue_indices_for_spans,
     _serialize_emitted_cues,
+    _style_spans_for_actions,
+    _style_warning_action_details,
     _style_retry_candidate_reasons,
     _style_retry_feedback,
     _wrap_phase_result,
@@ -72,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--prompt-profile", default=None)
     finalize.add_argument("--openai-base-url", default="https://api.openai.com/v1")
     finalize.add_argument("--glossary-log-path", default=None)
+    finalize.add_argument("--phase1-batch-json", default=None, help="Optional JSON written by submit/status for phase1 batch provenance")
+    finalize.add_argument("--strict-batch-json", default=None, help="Optional JSON written by submit/status for strict batch provenance")
 
     submit = subparsers.add_parser("submit", help="Upload a batch input file and create a Batch job.")
     submit.add_argument("--input-jsonl", required=True)
@@ -222,6 +228,38 @@ def _parse_batch_phase_result(translator, batch_row: dict) -> tuple[PhaseTransla
         return None, [f"parse_error:{type(exc).__name__}"]
 
 
+def _style_action_counter(spans: List[dict]) -> tuple[Dict[str, int], Dict[str, int]]:
+    action_counts: Dict[str, int] = {}
+    tail_counts: Dict[str, int] = {}
+    for span in spans:
+        action = span.get("preferred_action")
+        if not action:
+            continue
+        action_counts[action] = action_counts.get(action, 0) + 1
+        tail_type = span.get("source_tail_type")
+        if tail_type:
+            keyed = f"{action}|{tail_type}"
+            tail_counts[keyed] = tail_counts.get(keyed, 0) + 1
+    return action_counts, tail_counts
+
+
+def _load_batch_provenance(path_str: str | None, prefix: str) -> dict:
+    if not path_str:
+        return {}
+    payload = json.loads(Path(path_str).expanduser().read_text(encoding="utf-8"))
+    batch = payload.get("batch", payload if isinstance(payload, dict) else {})
+    file_payload = payload.get("file", {}) if isinstance(payload, dict) else {}
+    if not isinstance(batch, dict):
+        return {}
+    return {
+        f"{prefix}_batch_id": batch.get("id"),
+        f"{prefix}_input_file_id": batch.get("input_file_id") or file_payload.get("id"),
+        f"{prefix}_output_file_id": batch.get("output_file_id"),
+        f"{prefix}_error_file_id": batch.get("error_file_id"),
+        f"{prefix}_batch_status": batch.get("status"),
+    }
+
+
 def _provenance(config, args) -> dict:
     return {
         "schema_version": "translated_eval_record_v2",
@@ -348,6 +386,7 @@ def cmd_prepare_style_retry(args) -> int:
             block = _hydrate_block(row)
             glossary_terms = _deserialize_glossary_terms(row.get("glossary_terms", []))
             phase1_result, phase1_errors = _parse_batch_phase_result(translator, phase1_outputs.get(row["custom_id"]))
+            raw_phase1_result = phase1_result
             validation_reasons: List[str] = []
             if phase1_result is not None:
                 validation = validate_phase_structure(block, phase1_result.emitted_cues)
@@ -360,11 +399,68 @@ def cmd_prepare_style_retry(args) -> int:
             preferred_actions: List[str] = []
             protected_cue_indices: List[int] = []
             strict_custom_id = None
+            micro_edit_trace = {
+                "attempted": False,
+                "accepted": False,
+                "rejection_causes": [],
+                "candidate_emitted_cues": [],
+                "spans": [],
+            }
 
             if phase1_result is not None:
                 pre_gate = pre_wrap_gate(block, phase1_result.emitted_cues, glossary_terms, config)
                 wrapped = _wrap_phase_result(block, phase1_result, config, None)
                 post_gate = post_wrap_gate(wrapped, config)
+                style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
+                initial_offending_cue_indices, initial_offending_spans, initial_preferred_actions = _style_retry_feedback(
+                    block,
+                    pre_gate,
+                    post_gate,
+                    style_retry_reasons,
+                )
+                micro_edit_spans = _style_spans_for_actions(
+                    initial_offending_spans,
+                    ["drop_head_marker", "trim_explanatory_tail"],
+                )
+                if micro_edit_spans:
+                    micro_edit_trace["attempted"] = True
+                    micro_edit_trace["spans"] = micro_edit_spans
+                    deterministic_candidate = _apply_deterministic_style_micro_edits(phase1_result, micro_edit_spans)
+                    if deterministic_candidate is not None:
+                        deterministic_pre = pre_wrap_gate(block, deterministic_candidate.emitted_cues, glossary_terms, config)
+                        wrapped_deterministic = _wrap_phase_result(block, deterministic_candidate, config, None)
+                        deterministic_post = post_wrap_gate(wrapped_deterministic, config)
+                        deterministic_reasons = list(
+                            dict.fromkeys(
+                                str(span.get("issue"))
+                                for span in micro_edit_spans
+                                if span.get("issue")
+                            )
+                        )
+                        deterministic_protected = _protected_cue_indices_for_spans(block, micro_edit_spans)
+                        (
+                            phase1_result,
+                            pre_gate,
+                            post_gate,
+                            micro_accepted,
+                            micro_rejection_causes,
+                        ) = _choose_better_style_candidate(
+                            phase1_result,
+                            pre_gate,
+                            post_gate,
+                            deterministic_candidate,
+                            deterministic_pre,
+                            deterministic_post,
+                            deterministic_reasons,
+                            deterministic_protected,
+                            offending_spans=micro_edit_spans,
+                        )
+                        micro_edit_trace["candidate_emitted_cues"] = _serialize_emitted_cues(deterministic_candidate)
+                        micro_edit_trace["accepted"] = micro_accepted
+                        micro_edit_trace["rejection_causes"] = micro_rejection_causes
+                    else:
+                        micro_edit_trace["rejection_causes"] = ["deterministic_noop"]
+
                 style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
                 if style_retry_reasons:
                     offending_cue_indices, offending_spans, preferred_actions = _style_retry_feedback(
@@ -408,9 +504,11 @@ def cmd_prepare_style_retry(args) -> int:
                     {
                         **row,
                         "schema_version": "review_eval_batch_retry_manifest_v1",
+                        "raw_phase1_result": _phase_result_to_dict(raw_phase1_result) if raw_phase1_result is not None else None,
                         "phase1_result": _phase_result_to_dict(phase1_result) if phase1_result is not None else None,
                         "phase1_errors": phase1_errors,
                         "phase1_validation_reasons": validation_reasons,
+                        "micro_edit_trace": micro_edit_trace,
                         "strict_custom_id": strict_custom_id,
                         "style_retry_reasons": style_retry_reasons,
                         "offending_cue_indices": offending_cue_indices,
@@ -439,6 +537,10 @@ def cmd_finalize(args) -> int:
     strict_outputs = _parse_batch_output(Path(args.strict_output).expanduser()) if args.strict_output else {}
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_provenance = {
+        **_load_batch_provenance(args.phase1_batch_json, "phase1"),
+        **_load_batch_provenance(args.strict_batch_json, "strict"),
+    }
 
     with output_path.open("w", encoding="utf-8") as handle:
         for row in retry_manifest:
@@ -450,6 +552,7 @@ def cmd_finalize(args) -> int:
 
             final_result: PhaseTranslationResult
             pre_gate = post_gate_result = None
+            strict_result: PhaseTranslationResult | None = None
             style_retry_trace = {}
             style_retry_rejection_causes: Dict[str, int] = {}
             style_retry_invoked = bool(row.get("strict_custom_id"))
@@ -467,16 +570,19 @@ def cmd_finalize(args) -> int:
                 post_gate_result = post_wrap_gate(wrapped_phase1, config)
                 final_result = phase1_result
 
-            if style_retry_invoked:
+            if style_retry_invoked or row.get("micro_edit_trace", {}).get("attempted"):
                 style_retry_trace = {
                     "reasons": list(row.get("style_retry_reasons", [])),
                     "offending_cue_indices": list(row.get("offending_cue_indices", [])),
                     "protected_cue_indices": list(row.get("protected_cue_indices", [])),
                     "offending_spans": list(row.get("offending_spans", [])),
                     "preferred_actions": list(row.get("preferred_actions", [])),
-                    "base_phase1_emitted_cues": _serialize_emitted_cues(phase1_result) if phase1_result else [],
+                    "base_phase1_emitted_cues": _serialize_emitted_cues(
+                        _phase_result_from_dict(row["raw_phase1_result"])
+                    ) if row.get("raw_phase1_result") else (_serialize_emitted_cues(phase1_result) if phase1_result else []),
+                    "micro_edit_trace": row.get("micro_edit_trace", {}),
                 }
-                if phase1_result is not None:
+                if phase1_result is not None and style_retry_invoked:
                     strict_result, strict_errors = _parse_batch_phase_result(translator, strict_outputs.get(row["strict_custom_id"]))
                     if strict_result is None:
                         style_retry_rejected = True
@@ -528,6 +634,7 @@ def cmd_finalize(args) -> int:
                                     strict_post,
                                     row.get("style_retry_reasons", []),
                                     row.get("protected_cue_indices", []),
+                                    offending_spans=row.get("offending_spans", []),
                                 )
                                 style_retry_accepted = accepted
                                 style_retry_rejected = not accepted
@@ -540,13 +647,49 @@ def cmd_finalize(args) -> int:
                 style_retry_trace["final_risk_flags"] = list(final_result.risk_flags)
                 style_retry_trace["offending_cue_diffs"] = _offending_cue_diffs(
                     phase1_result if phase1_result is not None else final_result,
-                    strict_result if "strict_result" in locals() else None,
+                    strict_result,
                     final_result,
                     row.get("offending_cue_indices", []),
                 )
 
             wrapped_final = _wrap_phase_result(block, final_result, config, None)
             final_post = post_wrap_gate(wrapped_final, config)
+            remaining_warning_spans = _style_warning_action_details(pre_gate, final_post)
+            style_action_attempts: Dict[str, int] = {}
+            style_action_accepts: Dict[str, int] = {}
+            style_action_rejections: Dict[str, int] = {}
+            style_action_remaining_warnings, _ = _style_action_counter(remaining_warning_spans)
+            style_action_tail_attempts: Dict[str, int] = {}
+            style_action_tail_accepts: Dict[str, int] = {}
+            style_action_tail_rejections: Dict[str, int] = {}
+
+            def merge_counts(target: Dict[str, int], source: Dict[str, int]) -> None:
+                for key, value in source.items():
+                    target[key] = target.get(key, 0) + value
+
+            micro_trace = row.get("micro_edit_trace", {})
+            micro_attempts, micro_tail_attempts = _style_action_counter(micro_trace.get("spans", []))
+            merge_counts(style_action_attempts, micro_attempts)
+            merge_counts(style_action_tail_attempts, micro_tail_attempts)
+            if micro_trace.get("attempted"):
+                if micro_trace.get("accepted"):
+                    merge_counts(style_action_accepts, micro_attempts)
+                    merge_counts(style_action_tail_accepts, micro_tail_attempts)
+                else:
+                    merge_counts(style_action_rejections, micro_attempts)
+                    merge_counts(style_action_tail_rejections, micro_tail_attempts)
+
+            strict_attempts, strict_tail_attempts = _style_action_counter(row.get("offending_spans", []))
+            merge_counts(style_action_attempts, strict_attempts)
+            merge_counts(style_action_tail_attempts, strict_tail_attempts)
+            if style_retry_invoked:
+                if style_retry_accepted:
+                    merge_counts(style_action_accepts, strict_attempts)
+                    merge_counts(style_action_tail_accepts, strict_tail_attempts)
+                else:
+                    merge_counts(style_action_rejections, strict_attempts)
+                    merge_counts(style_action_tail_rejections, strict_tail_attempts)
+
             record = {
                 "schema_version": "translated_eval_record_v2",
                 "id": row["id"],
@@ -585,13 +728,20 @@ def cmd_finalize(args) -> int:
                     "strict_retry_candidate_risk_flags": {
                         flag: 1
                         for flag in style_retry_trace.get("strict_candidate_risk_flags", [])
-                    },
+                    } if style_retry_trace.get("accepted") else {},
                     "style_retry_rejection_causes": style_retry_rejection_causes,
+                    "style_action_attempts": style_action_attempts,
+                    "style_action_accepts": style_action_accepts,
+                    "style_action_rejections": style_action_rejections,
+                    "style_action_remaining_warnings": style_action_remaining_warnings,
+                    "style_action_tail_attempts": style_action_tail_attempts,
+                    "style_action_tail_accepts": style_action_tail_accepts,
+                    "style_action_tail_rejections": style_action_tail_rejections,
                     "captured_phase1_risk_flags": list(row.get("phase1_result", {}).get("risk_flags", [])) if row.get("phase1_result") else [],
                     "average_cps": round(_average_cps(wrapped_final), 3),
                     "style_retry_trace": style_retry_trace,
                 },
-                "provenance": row["provenance"],
+                "provenance": {**row["provenance"], **batch_provenance},
                 "review": {
                     "status": "pending",
                     "failure_tags": [],
@@ -610,6 +760,9 @@ def _make_batch_client(args) -> OpenAIBatchClient:
         api_key=config.openai_api_key,
         base_url=args.openai_base_url,
         timeout=config.request_timeout,
+        max_attempts=config.request_max_attempts,
+        backoff_min_seconds=config.request_backoff_min_seconds,
+        backoff_max_seconds=config.request_backoff_max_seconds,
     )
 
 

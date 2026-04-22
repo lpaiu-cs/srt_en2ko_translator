@@ -34,6 +34,13 @@ class TranslationMetrics:
     phase1_risk_flags: Dict[str, int] = field(default_factory=dict)
     strict_retry_candidate_risk_flags: Dict[str, int] = field(default_factory=dict)
     style_retry_rejection_causes: Dict[str, int] = field(default_factory=dict)
+    style_action_attempts: Dict[str, int] = field(default_factory=dict)
+    style_action_accepts: Dict[str, int] = field(default_factory=dict)
+    style_action_rejections: Dict[str, int] = field(default_factory=dict)
+    style_action_remaining_warnings: Dict[str, int] = field(default_factory=dict)
+    style_action_tail_attempts: Dict[str, int] = field(default_factory=dict)
+    style_action_tail_accepts: Dict[str, int] = field(default_factory=dict)
+    style_action_tail_rejections: Dict[str, int] = field(default_factory=dict)
     style_retry_trace: Dict[str, Any] = field(default_factory=dict)
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
@@ -77,6 +84,37 @@ class TranslationMetrics:
         for cause in causes:
             self.style_retry_rejection_causes[cause] = self.style_retry_rejection_causes.get(cause, 0) + 1
 
+    def note_style_action_attempts(self, spans: Iterable[Dict[str, Any]]) -> None:
+        for span in spans:
+            action = span.get("preferred_action")
+            if not action:
+                continue
+            self.style_action_attempts[action] = self.style_action_attempts.get(action, 0) + 1
+            tail_type = span.get("source_tail_type")
+            if tail_type:
+                key = f"{action}|{tail_type}"
+                self.style_action_tail_attempts[key] = self.style_action_tail_attempts.get(key, 0) + 1
+
+    def note_style_action_outcome(self, spans: Iterable[Dict[str, Any]], accepted: bool) -> None:
+        for span in spans:
+            action = span.get("preferred_action")
+            if not action:
+                continue
+            target = self.style_action_accepts if accepted else self.style_action_rejections
+            target[action] = target.get(action, 0) + 1
+            tail_type = span.get("source_tail_type")
+            if tail_type:
+                keyed = f"{action}|{tail_type}"
+                tail_target = self.style_action_tail_accepts if accepted else self.style_action_tail_rejections
+                tail_target[keyed] = tail_target.get(keyed, 0) + 1
+
+    def note_style_action_remaining_warnings(self, spans: Iterable[Dict[str, Any]]) -> None:
+        for span in spans:
+            action = span.get("preferred_action")
+            if not action:
+                continue
+            self.style_action_remaining_warnings[action] = self.style_action_remaining_warnings.get(action, 0) + 1
+
     def average_cps(self) -> float:
         if self.final_cue_count == 0:
             return 0.0
@@ -111,6 +149,13 @@ class TranslationMetrics:
             "phase1_risk_flags": self.phase1_risk_flags,
             "strict_retry_candidate_risk_flags": self.strict_retry_candidate_risk_flags,
             "style_retry_rejection_causes": self.style_retry_rejection_causes,
+            "style_action_attempts": self.style_action_attempts,
+            "style_action_accepts": self.style_action_accepts,
+            "style_action_rejections": self.style_action_rejections,
+            "style_action_remaining_warnings": self.style_action_remaining_warnings,
+            "style_action_tail_attempts": self.style_action_tail_attempts,
+            "style_action_tail_accepts": self.style_action_tail_accepts,
+            "style_action_tail_rejections": self.style_action_tail_rejections,
         }
 
     def summary(self) -> str:
