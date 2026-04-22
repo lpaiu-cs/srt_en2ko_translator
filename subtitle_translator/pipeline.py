@@ -55,6 +55,11 @@ STYLE_REASON_TO_RISK = {
 }
 
 _STRONG_CLOSURE_RE = re.compile(r"(입니다|합니다|됩니다|거죠|겁니다|있습니다|없습니다|이었다|이다|한다|했다)(?:[.!?\"'”’)\]]*)$")
+_PURPOSE_MARKER_RE = re.compile(r"(위해|위해서|하기 위해|하려고|하도록|하려면)")
+_THAT_CLAUSE_MARKER_RE = re.compile(r"(라고|라는|다고|다는|하면|된다면|때문에|인지|라는 점)")
+_RELATIVE_CLAUSE_MARKER_RE = re.compile(r"(하는|되는|했던|였던|인|할|될|보여주는|가지는)")
+_COMPARISON_MARKER_RE = re.compile(r"(처럼|같이|보다|만큼|에 비해|와 달리|대신)")
+_CONTINUATION_TAIL_RE = re.compile(r"(으로|에서|와|과|로|에|의|중|부터|까지|하며|하면서|한 채|및)$")
 
 
 def create_glossary_store(config: RuntimeConfig, glossary_log_path: Optional[str] = None) -> GlossaryStore:
@@ -249,14 +254,15 @@ def _style_retry_feedback(
             preferred_actions.append(default_actions[reason])
             continue
         for detail in details:
-            cue_indices = detail.get("cue_indices")
-            if isinstance(cue_indices, list):
-                for cue_index in cue_indices:
-                    if isinstance(cue_index, int) and cue_index not in offending_cues and cue_index >= 0:
-                        offending_cues.append(cue_index)
             cue_index = detail.get("cue_index")
             if isinstance(cue_index, int) and cue_index not in offending_cues and cue_index >= 0:
                 offending_cues.append(cue_index)
+            elif not isinstance(cue_index, int):
+                cue_indices = detail.get("cue_indices")
+                if isinstance(cue_indices, list):
+                    for nested_cue_index in cue_indices:
+                        if isinstance(nested_cue_index, int) and nested_cue_index not in offending_cues and nested_cue_index >= 0:
+                            offending_cues.append(nested_cue_index)
             action = detail.get("preferred_action")
             if isinstance(action, str) and action:
                 preferred_actions.append(action)
@@ -303,14 +309,15 @@ def _style_spans_for_actions(spans: Sequence[dict], actions: Sequence[str]) -> L
 def _protected_cue_indices_for_spans(block: TranslationBlock, spans: Sequence[dict]) -> List[int]:
     offending: set[int] = set()
     for span in spans:
-        cue_indices = span.get("cue_indices")
-        if isinstance(cue_indices, list):
-            for cue_index in cue_indices:
-                if isinstance(cue_index, int):
-                    offending.add(cue_index)
         cue_index = span.get("cue_index")
         if isinstance(cue_index, int):
             offending.add(cue_index)
+            continue
+        cue_indices = span.get("cue_indices")
+        if isinstance(cue_indices, list):
+            for nested_cue_index in cue_indices:
+                if isinstance(nested_cue_index, int):
+                    offending.add(nested_cue_index)
     return [cue.index for cue in block.cues if cue.index not in offending]
 
 
@@ -420,8 +427,7 @@ def _action_specific_style_rejection_causes(
             if left_text and _looks_like_duplicate_proposition(left_text, candidate_text):
                 rejection_causes.append("restore_tail_duplicate_persisted")
             source_tail_type = span.get("source_tail_type")
-            if source_tail_type and _STRONG_CLOSURE_RE.search(candidate_text):
-                rejection_causes.append("restore_tail_shape_overclosed")
+            rejection_causes.extend(_tail_type_specific_restore_rejection_causes(candidate_text, source_tail_type))
             matched_warning = _matching_warning_span(candidate_pre, candidate_post, "duplicate_restatement", cue_index)
             if matched_warning and matched_warning.get("preferred_action") == "restore_missing_tail":
                 rejection_causes.append("restore_tail_warning_persisted")
@@ -438,6 +444,41 @@ def _action_specific_style_rejection_causes(
                 rejection_causes.append("explanatory_tail_persisted")
 
     return list(dict.fromkeys(rejection_causes))
+
+
+def _tail_type_specific_restore_rejection_causes(candidate_text: str, source_tail_type: str | None) -> List[str]:
+    normalized = normalize_text(candidate_text)
+    if not source_tail_type or not normalized:
+        return []
+
+    rejection_causes: List[str] = []
+    strong_closure = _STRONG_CLOSURE_RE.search(normalized) is not None
+
+    if source_tail_type == "purpose_tail":
+        if _PURPOSE_MARKER_RE.search(normalized) is None:
+            rejection_causes.append("restore_tail_purpose_marker_missing")
+        if strong_closure:
+            rejection_causes.append("restore_tail_overclosed_for_purpose")
+    elif source_tail_type == "that_clause_tail":
+        if _THAT_CLAUSE_MARKER_RE.search(normalized) is None:
+            rejection_causes.append("restore_tail_that_clause_shape_missing")
+        if strong_closure:
+            rejection_causes.append("restore_tail_overclosed_for_that_clause")
+    elif source_tail_type == "relative_clause_tail":
+        if _RELATIVE_CLAUSE_MARKER_RE.search(normalized) is None:
+            rejection_causes.append("restore_tail_relative_clause_shape_missing")
+        if strong_closure:
+            rejection_causes.append("restore_tail_overclosed_for_relative_clause")
+    elif source_tail_type == "comparison_tail":
+        if _COMPARISON_MARKER_RE.search(normalized) is None:
+            rejection_causes.append("restore_tail_comparison_shape_missing")
+        if strong_closure:
+            rejection_causes.append("restore_tail_overclosed_for_comparison")
+    elif source_tail_type == "continuation_tail":
+        if _CONTINUATION_TAIL_RE.search(normalized) is None and strong_closure:
+            rejection_causes.append("restore_tail_overclosed_for_continuation")
+
+    return rejection_causes
 
 
 def _glossary_terms_for_block(block: TranslationBlock, glossary_store: Optional[GlossaryStore]) -> list:
@@ -857,7 +898,7 @@ def _translate_block_recursive(
         )
         if deterministic_spans:
             if metrics:
-                metrics.note_style_action_attempts(deterministic_spans)
+                metrics.note_style_action_attempts(deterministic_spans, channel="micro_edit")
                 metrics.style_retry_trace["micro_edit_attempted"] = True
                 metrics.style_retry_trace["micro_edit_spans"] = list(deterministic_spans)
             deterministic_candidate = _apply_deterministic_style_micro_edits(final_result, deterministic_spans)
@@ -891,12 +932,12 @@ def _translate_block_recursive(
                     offending_spans=deterministic_spans,
                 )
                 if metrics:
-                    metrics.note_style_action_outcome(deterministic_spans, deterministic_accepted)
+                    metrics.note_style_action_outcome(deterministic_spans, deterministic_accepted, channel="micro_edit")
                     metrics.style_retry_trace["micro_edit_candidate_emitted_cues"] = _serialize_emitted_cues(deterministic_candidate)
                     metrics.style_retry_trace["micro_edit_accepted"] = deterministic_accepted
                     metrics.style_retry_trace["micro_edit_rejection_causes"] = list(deterministic_rejection_causes)
             elif metrics:
-                metrics.note_style_action_outcome(deterministic_spans, False)
+                metrics.note_style_action_outcome(deterministic_spans, False, channel="micro_edit")
                 metrics.style_retry_trace["micro_edit_candidate_emitted_cues"] = []
                 metrics.style_retry_trace["micro_edit_accepted"] = False
                 metrics.style_retry_trace["micro_edit_rejection_causes"] = ["deterministic_noop"]
@@ -911,7 +952,7 @@ def _translate_block_recursive(
             )
             protected_cue_indices = _protected_cue_indices_for_spans(block, offending_spans)
             if metrics:
-                metrics.note_style_action_attempts(offending_spans)
+                metrics.note_style_action_attempts(offending_spans, channel="strict_retry")
                 metrics.style_retry_trace["reasons"] = list(style_retry_reasons)
                 metrics.style_retry_trace["offending_cue_indices"] = list(offending_cue_indices)
                 metrics.style_retry_trace["protected_cue_indices"] = list(protected_cue_indices)
@@ -949,7 +990,7 @@ def _translate_block_recursive(
                 ):
                     if metrics:
                         metrics.style_retry_rejected += 1
-                        metrics.note_style_action_outcome(offending_spans, False)
+                        metrics.note_style_action_outcome(offending_spans, False, channel="strict_retry")
                         metrics.add_style_retry_rejection_causes(["overedited_candidate"])
                     warn(
                         f"Rejected strict style retry for cues {[cue.index for cue in block.cues]} "
@@ -970,7 +1011,7 @@ def _translate_block_recursive(
                         offending_spans=offending_spans,
                     )
                     if metrics:
-                        metrics.note_style_action_outcome(offending_spans, accepted)
+                        metrics.note_style_action_outcome(offending_spans, accepted, channel="strict_retry")
                         if accepted:
                             metrics.style_retry_accepted += 1
                             metrics.add_strict_retry_candidate_risk_flags(strict_phase1.risk_flags)
@@ -981,7 +1022,7 @@ def _translate_block_recursive(
                         metrics.style_retry_trace["rejection_causes"] = rejection_causes
             elif metrics:
                 metrics.style_retry_rejected += 1
-                metrics.note_style_action_outcome(offending_spans, False)
+                metrics.note_style_action_outcome(offending_spans, False, channel="strict_retry")
                 metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
                 metrics.style_retry_trace["strict_candidate_risk_flags"] = []
                 metrics.style_retry_trace["accepted"] = False
@@ -995,7 +1036,16 @@ def _translate_block_recursive(
 
     if metrics:
         metrics.add_phase1_risk_flags(final_result.risk_flags)
-        metrics.note_style_action_remaining_warnings(_style_warning_action_details(final_pre, final_post))
+        remaining_style_spans = _style_warning_action_details(final_pre, final_post)
+        metrics.note_style_action_remaining_warnings(remaining_style_spans)
+        metrics.note_style_action_remaining_warnings(
+            _style_spans_for_actions(remaining_style_spans, ["drop_head_marker", "trim_explanatory_tail"]),
+            channel="micro_edit",
+        )
+        metrics.note_style_action_remaining_warnings(
+            _style_spans_for_actions(remaining_style_spans, ["delete_repeat_local", "restore_missing_tail"]),
+            channel="strict_retry",
+        )
         if metrics.style_retry_trace:
             metrics.style_retry_trace["final_emitted_cues"] = _serialize_emitted_cues(final_result)
             metrics.style_retry_trace["final_risk_flags"] = list(final_result.risk_flags)

@@ -662,33 +662,66 @@ def cmd_finalize(args) -> int:
             style_action_tail_attempts: Dict[str, int] = {}
             style_action_tail_accepts: Dict[str, int] = {}
             style_action_tail_rejections: Dict[str, int] = {}
+            style_action_attempts_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_accepts_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_rejections_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_remaining_warnings_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_tail_attempts_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_tail_accepts_by_channel: Dict[str, Dict[str, int]] = {}
+            style_action_tail_rejections_by_channel: Dict[str, Dict[str, int]] = {}
 
             def merge_counts(target: Dict[str, int], source: Dict[str, int]) -> None:
                 for key, value in source.items():
                     target[key] = target.get(key, 0) + value
 
+            def merge_channel_counts(target: Dict[str, Dict[str, int]], channel: str, source: Dict[str, int]) -> None:
+                per_channel = target.setdefault(channel, {})
+                for key, value in source.items():
+                    per_channel[key] = per_channel.get(key, 0) + value
+
             micro_trace = row.get("micro_edit_trace", {})
             micro_attempts, micro_tail_attempts = _style_action_counter(micro_trace.get("spans", []))
             merge_counts(style_action_attempts, micro_attempts)
             merge_counts(style_action_tail_attempts, micro_tail_attempts)
+            merge_channel_counts(style_action_attempts_by_channel, "micro_edit", micro_attempts)
+            merge_channel_counts(style_action_tail_attempts_by_channel, "micro_edit", micro_tail_attempts)
             if micro_trace.get("attempted"):
                 if micro_trace.get("accepted"):
                     merge_counts(style_action_accepts, micro_attempts)
                     merge_counts(style_action_tail_accepts, micro_tail_attempts)
+                    merge_channel_counts(style_action_accepts_by_channel, "micro_edit", micro_attempts)
+                    merge_channel_counts(style_action_tail_accepts_by_channel, "micro_edit", micro_tail_attempts)
                 else:
                     merge_counts(style_action_rejections, micro_attempts)
                     merge_counts(style_action_tail_rejections, micro_tail_attempts)
+                    merge_channel_counts(style_action_rejections_by_channel, "micro_edit", micro_attempts)
+                    merge_channel_counts(style_action_tail_rejections_by_channel, "micro_edit", micro_tail_attempts)
 
             strict_attempts, strict_tail_attempts = _style_action_counter(row.get("offending_spans", []))
             merge_counts(style_action_attempts, strict_attempts)
             merge_counts(style_action_tail_attempts, strict_tail_attempts)
+            merge_channel_counts(style_action_attempts_by_channel, "strict_retry", strict_attempts)
+            merge_channel_counts(style_action_tail_attempts_by_channel, "strict_retry", strict_tail_attempts)
             if style_retry_invoked:
                 if style_retry_accepted:
                     merge_counts(style_action_accepts, strict_attempts)
                     merge_counts(style_action_tail_accepts, strict_tail_attempts)
+                    merge_channel_counts(style_action_accepts_by_channel, "strict_retry", strict_attempts)
+                    merge_channel_counts(style_action_tail_accepts_by_channel, "strict_retry", strict_tail_attempts)
                 else:
                     merge_counts(style_action_rejections, strict_attempts)
                     merge_counts(style_action_tail_rejections, strict_tail_attempts)
+                    merge_channel_counts(style_action_rejections_by_channel, "strict_retry", strict_attempts)
+                    merge_channel_counts(style_action_tail_rejections_by_channel, "strict_retry", strict_tail_attempts)
+
+            micro_remaining, _ = _style_action_counter(
+                [span for span in remaining_warning_spans if span.get("preferred_action") in {"drop_head_marker", "trim_explanatory_tail"}]
+            )
+            strict_remaining, _ = _style_action_counter(
+                [span for span in remaining_warning_spans if span.get("preferred_action") in {"delete_repeat_local", "restore_missing_tail"}]
+            )
+            merge_channel_counts(style_action_remaining_warnings_by_channel, "micro_edit", micro_remaining)
+            merge_channel_counts(style_action_remaining_warnings_by_channel, "strict_retry", strict_remaining)
 
             record = {
                 "schema_version": "translated_eval_record_v2",
@@ -737,6 +770,13 @@ def cmd_finalize(args) -> int:
                     "style_action_tail_attempts": style_action_tail_attempts,
                     "style_action_tail_accepts": style_action_tail_accepts,
                     "style_action_tail_rejections": style_action_tail_rejections,
+                    "style_action_attempts_by_channel": style_action_attempts_by_channel,
+                    "style_action_accepts_by_channel": style_action_accepts_by_channel,
+                    "style_action_rejections_by_channel": style_action_rejections_by_channel,
+                    "style_action_remaining_warnings_by_channel": style_action_remaining_warnings_by_channel,
+                    "style_action_tail_attempts_by_channel": style_action_tail_attempts_by_channel,
+                    "style_action_tail_accepts_by_channel": style_action_tail_accepts_by_channel,
+                    "style_action_tail_rejections_by_channel": style_action_tail_rejections_by_channel,
                     "captured_phase1_risk_flags": list(row.get("phase1_result", {}).get("risk_flags", [])) if row.get("phase1_result") else [],
                     "average_cps": round(_average_cps(wrapped_final), 3),
                     "style_retry_trace": style_retry_trace,

@@ -41,6 +41,13 @@ class TranslationMetrics:
     style_action_tail_attempts: Dict[str, int] = field(default_factory=dict)
     style_action_tail_accepts: Dict[str, int] = field(default_factory=dict)
     style_action_tail_rejections: Dict[str, int] = field(default_factory=dict)
+    style_action_attempts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_accepts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_rejections_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_remaining_warnings_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_tail_attempts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_tail_accepts_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    style_action_tail_rejections_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_retry_trace: Dict[str, Any] = field(default_factory=dict)
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
@@ -84,36 +91,54 @@ class TranslationMetrics:
         for cause in causes:
             self.style_retry_rejection_causes[cause] = self.style_retry_rejection_causes.get(cause, 0) + 1
 
-    def note_style_action_attempts(self, spans: Iterable[Dict[str, Any]]) -> None:
+    def _bump_channel_counter(self, bucket: Dict[str, Dict[str, int]], channel: str, key: str) -> None:
+        per_channel = bucket.setdefault(channel, {})
+        per_channel[key] = per_channel.get(key, 0) + 1
+
+    def note_style_action_attempts(self, spans: Iterable[Dict[str, Any]], channel: str | None = None) -> None:
         for span in spans:
             action = span.get("preferred_action")
             if not action:
                 continue
             self.style_action_attempts[action] = self.style_action_attempts.get(action, 0) + 1
+            if channel:
+                self._bump_channel_counter(self.style_action_attempts_by_channel, channel, action)
             tail_type = span.get("source_tail_type")
             if tail_type:
                 key = f"{action}|{tail_type}"
                 self.style_action_tail_attempts[key] = self.style_action_tail_attempts.get(key, 0) + 1
+                if channel:
+                    self._bump_channel_counter(self.style_action_tail_attempts_by_channel, channel, key)
 
-    def note_style_action_outcome(self, spans: Iterable[Dict[str, Any]], accepted: bool) -> None:
+    def note_style_action_outcome(self, spans: Iterable[Dict[str, Any]], accepted: bool, channel: str | None = None) -> None:
         for span in spans:
             action = span.get("preferred_action")
             if not action:
                 continue
             target = self.style_action_accepts if accepted else self.style_action_rejections
             target[action] = target.get(action, 0) + 1
+            if channel:
+                channel_target = self.style_action_accepts_by_channel if accepted else self.style_action_rejections_by_channel
+                self._bump_channel_counter(channel_target, channel, action)
             tail_type = span.get("source_tail_type")
             if tail_type:
                 keyed = f"{action}|{tail_type}"
                 tail_target = self.style_action_tail_accepts if accepted else self.style_action_tail_rejections
                 tail_target[keyed] = tail_target.get(keyed, 0) + 1
+                if channel:
+                    tail_channel_target = (
+                        self.style_action_tail_accepts_by_channel if accepted else self.style_action_tail_rejections_by_channel
+                    )
+                    self._bump_channel_counter(tail_channel_target, channel, keyed)
 
-    def note_style_action_remaining_warnings(self, spans: Iterable[Dict[str, Any]]) -> None:
+    def note_style_action_remaining_warnings(self, spans: Iterable[Dict[str, Any]], channel: str | None = None) -> None:
         for span in spans:
             action = span.get("preferred_action")
             if not action:
                 continue
             self.style_action_remaining_warnings[action] = self.style_action_remaining_warnings.get(action, 0) + 1
+            if channel:
+                self._bump_channel_counter(self.style_action_remaining_warnings_by_channel, channel, action)
 
     def average_cps(self) -> float:
         if self.final_cue_count == 0:
@@ -156,6 +181,13 @@ class TranslationMetrics:
             "style_action_tail_attempts": self.style_action_tail_attempts,
             "style_action_tail_accepts": self.style_action_tail_accepts,
             "style_action_tail_rejections": self.style_action_tail_rejections,
+            "style_action_attempts_by_channel": self.style_action_attempts_by_channel,
+            "style_action_accepts_by_channel": self.style_action_accepts_by_channel,
+            "style_action_rejections_by_channel": self.style_action_rejections_by_channel,
+            "style_action_remaining_warnings_by_channel": self.style_action_remaining_warnings_by_channel,
+            "style_action_tail_attempts_by_channel": self.style_action_tail_attempts_by_channel,
+            "style_action_tail_accepts_by_channel": self.style_action_tail_accepts_by_channel,
+            "style_action_tail_rejections_by_channel": self.style_action_tail_rejections_by_channel,
         }
 
     def summary(self) -> str:

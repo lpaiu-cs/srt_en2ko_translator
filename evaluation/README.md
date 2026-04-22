@@ -29,6 +29,11 @@ Translated replay JSONL also includes:
 - `pipeline_signals`: retry/repair/fallback signals plus captured `phase1_risk_flags`.
 - `provenance`: `phase1_model`, `repair_model`, temperatures, `prompt_profile`, `git_sha`, and whether `--frozen-blocks` was used.
 
+Action-oriented replay JSONL also includes:
+
+- `pipeline_signals.style_action_*`: aggregate action counts.
+- `pipeline_signals.style_action_*_by_channel`: the same counts split into `micro_edit` and `strict_retry`.
+
 ## Review Tags
 
 Use the `review.failure_tags` array for manual labeling:
@@ -66,6 +71,22 @@ python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jso
 ```
 
 Use frozen-block mode when the variable under test is prompt/profile/model behavior rather than block-boundary changes.
+
+Two replay lanes are useful and should be kept separate:
+
+- `style-only`: `--frozen-blocks --disable-repair --phase1-temperature 0.0`
+- `full-pipeline`: frozen or dynamic replay with repair enabled
+
+Do not compare the two lanes as if they were the same benchmark. The style-only lane isolates Phase1 + deterministic micro-edit + strict retry behavior; the full-pipeline lane measures shipping behavior.
+
+`restore_missing_tail` also has a dedicated stress-set builder:
+
+```bash
+python3 build_restore_tail_stress_set.py \
+  --input-dir cs231n_sp25/eng \
+  --output evaluation/cs231n_sp25_restore_missing_tail_stress.jsonl \
+  --per-tail-type 4
+```
 
 For larger frozen evals where synchronous rate limits add noise, use the Batch lane:
 

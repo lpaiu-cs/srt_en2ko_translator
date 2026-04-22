@@ -567,6 +567,132 @@ def _phase1_example_messages(prompt_profile: str, strict_style_retry: bool = Fal
         }
         messages.append({"role": "user", "content": json.dumps(strict_head_user, ensure_ascii=False)})
         messages.append({"role": "assistant", "content": json.dumps(strict_head_assistant, ensure_ascii=False)})
+        strict_purpose_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": [],
+                "lint_actions": [],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다. 조금 더 구조가 필요합니다.",
+                "note": "Restore the missing purpose-tail meaning in cue 2 without repeating cue 1.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 1020,
+                    "start": "00:00:40,000",
+                    "end": "00:00:41,800",
+                    "text": "But we need a little bit more structure here",
+                    "duration_ms": 1800,
+                    "gap_after_ms": 50,
+                },
+                {
+                    "cue_index": 1021,
+                    "start": "00:00:41,850",
+                    "end": "00:00:43,900",
+                    "text": "to actually make progress.",
+                    "duration_ms": 2050,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 1020, "text": "하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다."},
+                {"cue_index": 1021, "text": "조금 더 구조가 필요합니다."},
+            ],
+            "offending_cue_indices": [1021],
+            "protected_cue_indices": [1020],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 1021,
+                    "cue_indices": [1020, 1021],
+                    "span_text": "조금 더 구조가 필요합니다.",
+                    "left_text": "하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다.",
+                    "right_text": "조금 더 구조가 필요합니다.",
+                    "source_cue_text": "to actually make progress.",
+                    "source_tail_type": "purpose_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                }
+            ],
+        }
+        strict_purpose_assistant = {
+            "emitted_cues": [
+                {"cue_index": 1020, "text": "하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다."},
+                {"cue_index": 1021, "text": "실제로 진전을 이루기 위해서요."},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_purpose_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_purpose_assistant, ensure_ascii=False)})
+        strict_relative_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": [],
+                "lint_actions": [],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "50이 꽤 좋은 값입니다. 대부분의 사람들이 실제로 사용합니다.",
+                "note": "Restore the relative-clause tail as a modifier, not as a new closed sentence.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 1198,
+                    "start": "00:01:10,000",
+                    "end": "00:01:12,000",
+                    "text": "but 50 is a pretty good one",
+                    "duration_ms": 2000,
+                    "gap_after_ms": 30,
+                },
+                {
+                    "cue_index": 1199,
+                    "start": "00:01:12,030",
+                    "end": "00:01:13,400",
+                    "text": "that most people use in practice.",
+                    "duration_ms": 1370,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 1198, "text": "하지만 50이 꽤 좋은 값입니다."},
+                {"cue_index": 1199, "text": "대부분의 사람들이 실제로 사용합니다."},
+            ],
+            "offending_cue_indices": [1199],
+            "protected_cue_indices": [1198],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 1199,
+                    "cue_indices": [1198, 1199],
+                    "span_text": "대부분의 사람들이 실제로 사용합니다.",
+                    "left_text": "하지만 50이 꽤 좋은 값입니다.",
+                    "right_text": "대부분의 사람들이 실제로 사용합니다.",
+                    "source_cue_text": "that most people use in practice.",
+                    "source_tail_type": "relative_clause_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                }
+            ],
+        }
+        strict_relative_assistant = {
+            "emitted_cues": [
+                {"cue_index": 1198, "text": "하지만 50이 꽤 좋은 값이고,"},
+                {"cue_index": 1199, "text": "대부분의 사람들이 실제로 사용하는"},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_relative_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_relative_assistant, ensure_ascii=False)})
     return messages
 
 
@@ -612,7 +738,12 @@ def build_phase1_system_prompt(
                 "If preferred_actions include trim_explanatory_tail, delete unsupported trailing explanation instead of replacing it with another explanatory tail.",
                 "If preferred_actions include delete_repeat_local, remove the repeated local proposition instead of paraphrasing it again.",
                 "If preferred_actions include restore_missing_tail, rewrite the offending cue so it restores that cue's missing local source meaning instead of repeating the previous cue.",
-                "When offending_spans include source_tail_type, preserve that tail shape. For purpose_tail, that_clause_tail, relative_clause_tail, and comparison_tail, do not force a full copular sentence ending unless the source itself closes the thought.",
+                "When offending_spans include source_tail_type, preserve that tail shape instead of normalizing it into a generic sentence.",
+                "For purpose_tail, restore a purpose fragment such as '...하기 위해', '...하려고', or '...하도록' and avoid a copular ending like '...입니다'.",
+                "For that_clause_tail, keep a subordinate-clause shape such as '...라고', '...라는', '...다고', '...하면', or '...때문에' rather than a standalone closed sentence.",
+                "For relative_clause_tail, keep a modifier shape such as '...하는', '...되는', '...인', or '...할' rather than a standalone sentence.",
+                "For comparison_tail, keep a comparison shape such as '...처럼', '...같이', '...보다', '...만큼', or '...에 비해' instead of closing the thought.",
+                "For continuation_tail, prefer a connective continuation over a full sentence ending when the source tail is only a connective phrase.",
                 "Keep unaffected cues as close as possible to the previous anchor-preserving wording.",
             ]
         )
