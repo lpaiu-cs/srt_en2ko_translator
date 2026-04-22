@@ -102,6 +102,17 @@ python3 build_restore_tail_replay_set.py \
 
 This replay set is not a coverage set. It is meant to benchmark actual `restore_missing_tail` selector decisions with preserved offending/protected cue metadata.
 Each replay row also keeps a `replay_trace` snapshot with offending/protected cue ids, base Phase1 offending cue text, raw strict candidate text, post-normalization edits, final offending cue text, and accept/reject outcome.
+Replayed outputs should now also be read with `surface_state`:
+
+- `surfaced_same_action`
+- `surfaced_other_action`
+- `unsurfaced`
+
+Use `tail_type × accept_mode × surface_state` together. Acceptance alone can be misleading when a historical replay row no longer surfaces under the same action in the current build.
+Replay outputs also expose:
+
+- `replay_transition`: `historical_outcome -> current surface_state -> current accept_mode`
+- `style_retry_rejection_stage`: coarse current-lane stage such as `strict_retry_selector`, `strict_retry_generation`, `strict_retry_postwrap`, `strict_retry_overedit`, or `not_invoked`
 
 For larger frozen evals where synchronous rate limits add noise, use the Batch lane:
 

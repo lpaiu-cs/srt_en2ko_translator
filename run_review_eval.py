@@ -212,6 +212,79 @@ def _input_cue_indices(entry: dict) -> List[int]:
     return block_data.get("cue_indices", [])
 
 
+def _current_surfaced_actions(trace: dict) -> List[str]:
+    actions = {
+        str(span.get("preferred_action"))
+        for span in trace.get("offending_spans", [])
+        if span.get("preferred_action")
+    }
+    if not actions:
+        actions = {str(action) for action in trace.get("preferred_actions", []) if action}
+    return sorted(actions)
+
+
+def _replay_surface_info(entry: dict, trace: dict) -> dict:
+    replay_meta = entry.get("replay_meta") or {}
+    expected_action = replay_meta.get("style_focus")
+    current_actions = _current_surfaced_actions(trace)
+    if not expected_action:
+        state = None
+    elif expected_action in current_actions:
+        state = "surfaced_same_action"
+    elif current_actions:
+        state = "surfaced_other_action"
+    else:
+        state = "unsurfaced"
+    return {
+        "expected_action": expected_action,
+        "historical_tail_type": replay_meta.get("source_tail_type"),
+        "historical_outcome": replay_meta.get("style_retry_outcome"),
+        "surface_state": state,
+        "current_actions": current_actions,
+    }
+
+
+def _current_accept_mode(signals: dict) -> str:
+    trace = signals.get("style_retry_trace", {})
+    if signals.get("style_retry_accepted"):
+        return trace.get("accept_mode") or "accepted"
+    if signals.get("style_retry_rejected"):
+        return "rejected"
+    if trace.get("micro_edit_accepted"):
+        return "micro_edit_only"
+    return "not_invoked"
+
+
+def _style_retry_rejection_stage(signals: dict) -> str:
+    trace = signals.get("style_retry_trace", {})
+    if signals.get("style_retry_accepted"):
+        return "accepted"
+    if trace.get("micro_edit_attempted") and not trace.get("micro_edit_accepted", False) and not signals.get("style_retry_invoked"):
+        return "micro_edit_rejected"
+    if not signals.get("style_retry_invoked"):
+        return "not_invoked"
+    causes = list(trace.get("rejection_causes", []))
+    if not causes:
+        return "strict_retry_unknown"
+    if "overedited_candidate" in causes:
+        return "strict_retry_overedit"
+    if "post_wrap_regression" in causes:
+        return "strict_retry_postwrap"
+    if any(cause.startswith("strict_retry_") or cause == "strict_retry_exception" for cause in causes):
+        return "strict_retry_generation"
+    return "strict_retry_selector"
+
+
+def _replay_transition(entry: dict, signals: dict) -> str | None:
+    replay_meta = entry.get("replay_meta") or {}
+    historical_outcome = replay_meta.get("style_retry_outcome")
+    surface_state = signals.get("replay_surface_state")
+    current_mode = _current_accept_mode(signals)
+    if not historical_outcome or not surface_state:
+        return None
+    return f"{historical_outcome}->{surface_state}->{current_mode}"
+
+
 def main() -> int:
     args = build_parser().parse_args()
     review_path = Path(args.input).expanduser()
@@ -275,12 +348,15 @@ def main() -> int:
                 ancestor_failure_signatures=(),
             )
             metrics.note_final_cues(translated_cues)
+            replay_surface = _replay_surface_info(entry, metrics.style_retry_trace)
             record = {
                 "schema_version": "translated_eval_record_v2",
                 "id": entry["id"],
                 "lecture": entry["lecture"],
                 "source_file": entry["source_file"],
                 "source_review": _input_review(entry),
+                "replay_meta": entry.get("replay_meta"),
+                "replay_trace": entry.get("replay_trace"),
                 "input_cue_indices": _input_cue_indices(entry),
                 "current_block": {
                     "cue_indices": [cue.index for cue in block.cues],
@@ -333,6 +409,11 @@ def main() -> int:
                     "style_action_tail_accept_modes_by_channel": dict(metrics.style_action_tail_accept_modes_by_channel),
                     "captured_phase1_risk_flags": sorted(set(tracing_translator.phase1_risk_flags)),
                     "average_cps": round(metrics.average_cps(), 3),
+                    "replay_surface_state": replay_surface["surface_state"],
+                    "replay_expected_action": replay_surface["expected_action"],
+                    "replay_current_actions": replay_surface["current_actions"],
+                    "replay_historical_tail_type": replay_surface["historical_tail_type"],
+                    "replay_historical_outcome": replay_surface["historical_outcome"],
                     "style_retry_trace": metrics.style_retry_trace,
                 },
                 "provenance": provenance,
@@ -342,6 +423,9 @@ def main() -> int:
                     "notes": "",
                 },
             }
+            record["pipeline_signals"]["style_retry_rejection_stage"] = _style_retry_rejection_stage(record["pipeline_signals"])
+            record["pipeline_signals"]["replay_current_accept_mode"] = _current_accept_mode(record["pipeline_signals"])
+            record["pipeline_signals"]["replay_transition"] = _replay_transition(entry, record["pipeline_signals"])
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     print(f"Wrote translated eval records to {output_path}")

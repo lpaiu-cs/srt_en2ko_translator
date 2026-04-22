@@ -59,9 +59,22 @@ def _outcome(row: dict) -> str:
 def _trace_quality_score(row: dict, trace: dict, tail_type: str) -> tuple[int, int, int, int]:
     protected = trace.get("protected_cue_indices", [])
     offending = trace.get("offending_cue_indices", [])
+    replay_trace = row.get("replay_trace") or row.get("pipeline_signals", {}).get("style_retry_trace", {})
+    richness = 0
+    if replay_trace.get("base_phase1_emitted_cues"):
+        richness += 1
+    if replay_trace.get("strict_candidate_raw_emitted_cues"):
+        richness += 2
+    if replay_trace.get("strict_candidate_emitted_cues"):
+        richness += 1
+    if replay_trace.get("strict_candidate_post_normalizations"):
+        richness += 2
+    if replay_trace.get("final_emitted_cues"):
+        richness += 1
     return (
         int(tail_type != "unknown"),
         int(bool(protected)),
+        richness,
         -len(offending or []),
         int(row.get("pipeline_signals", {}).get("style_retry_invoked", False)),
     )
