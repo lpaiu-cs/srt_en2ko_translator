@@ -22,6 +22,7 @@ from subtitle_translator import (
 from subtitle_translator.openai_batch import OpenAIBatchClient, parse_batch_output_line
 from subtitle_translator.pipeline import (
     _apply_deterministic_style_micro_edits,
+    _apply_purpose_tail_post_normalization,
     _candidate_is_overedited,
     _choose_better_style_candidate,
     _fallback_source_result,
@@ -588,13 +589,19 @@ def cmd_finalize(args) -> int:
                         style_retry_rejected = True
                         style_retry_trace["strict_candidate_emitted_cues"] = []
                         style_retry_trace["strict_candidate_risk_flags"] = []
+                        style_retry_trace["strict_candidate_post_normalizations"] = []
                         style_retry_trace["accepted"] = False
                         style_retry_trace["rejection_causes"] = list(strict_errors)
                         for cause in strict_errors:
                             style_retry_rejection_causes[cause] = style_retry_rejection_causes.get(cause, 0) + 1
                     else:
+                        strict_result, strict_post_normalizations = _apply_purpose_tail_post_normalization(
+                            strict_result,
+                            row.get("offending_spans", []),
+                        )
                         style_retry_trace["strict_candidate_emitted_cues"] = _serialize_emitted_cues(strict_result)
                         style_retry_trace["strict_candidate_risk_flags"] = list(strict_result.risk_flags)
+                        style_retry_trace["strict_candidate_post_normalizations"] = list(strict_post_normalizations)
                         strict_validation = validate_phase_structure(block, strict_result.emitted_cues)
                         if not strict_validation.valid:
                             rejection_causes = [f"strict_retry_{reason}" for reason in strict_validation.reasons]

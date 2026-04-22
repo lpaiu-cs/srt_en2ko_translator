@@ -6,6 +6,7 @@ from subtitle_translator.config import load_runtime_config
 from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, TranslationBlock
 from subtitle_translator.pipeline import (
     _apply_deterministic_style_micro_edits,
+    _apply_purpose_tail_post_normalization,
     _choose_better_style_candidate,
     _protected_cue_indices_for_spans,
     _wrap_phase_result,
@@ -126,6 +127,63 @@ class StyleActionTests(unittest.TestCase):
         self.assertEqual(rejection_causes, [])
         self.assertEqual(final_result.emitted_cues[1].text, "실제로 진전을 이루기 위해서요.")
         self.assertEqual(_protected_cue_indices_for_spans(block, offending_spans), [1020])
+
+    def test_purpose_tail_post_normalization_salvages_overclosed_candidate(self) -> None:
+        block = TranslationBlock(
+            cues=[
+                Cue(index=1020, start="00:38:52,147", end="00:38:53,980", text="But we need a little bit more structure here"),
+                Cue(index=1021, start="00:38:53,980", end="00:38:56,900", text="to actually make progress."),
+            ]
+        )
+        current = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=1020, text="하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다."),
+                EmittedCue(cue_index=1021, text="조금 더 구조가 필요합니다."),
+            ],
+            risk_flags=["duplicate_restatement_risk"],
+        )
+        overclosed = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=1020, text="하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다."),
+                EmittedCue(cue_index=1021, text="실제로 진전을 이루기 위해서입니다."),
+            ],
+            risk_flags=[],
+        )
+        offending_spans = [
+            {
+                "cue_index": 1021,
+                "cue_indices": [1020, 1021],
+                "span_text": "조금 더 구조가 필요합니다.",
+                "left_text": "하지만 실제로 진전을 이루려면 여기서 조금 더 구조가 필요합니다.",
+                "right_text": "조금 더 구조가 필요합니다.",
+                "source_cue_text": "to actually make progress.",
+                "source_tail_type": "purpose_tail",
+                "issue": "duplicate_restatement",
+                "preferred_action": "restore_missing_tail",
+            }
+        ]
+        normalized, applied = _apply_purpose_tail_post_normalization(overclosed, offending_spans)
+        self.assertEqual(normalized.emitted_cues[1].text, "실제로 진전을 이루기 위해")
+        self.assertEqual(applied[0]["cue_index"], 1021)
+
+        current_pre = pre_wrap_gate(block, current.emitted_cues, [], self.config)
+        current_post = post_wrap_gate(_wrap_phase_result(block, current, self.config, None), self.config)
+        candidate_pre = pre_wrap_gate(block, normalized.emitted_cues, [], self.config)
+        candidate_post = post_wrap_gate(_wrap_phase_result(block, normalized, self.config, None), self.config)
+
+        _, _, _, accepted, rejection_causes = _choose_better_style_candidate(
+            current,
+            current_pre,
+            current_post,
+            normalized,
+            candidate_pre,
+            candidate_post,
+            ["duplicate_restatement"],
+            _protected_cue_indices_for_spans(block, offending_spans),
+            offending_spans=offending_spans,
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(rejection_causes, [])
 
     def test_restore_missing_tail_rejects_purpose_tail_without_purpose_marker(self) -> None:
         block = TranslationBlock(

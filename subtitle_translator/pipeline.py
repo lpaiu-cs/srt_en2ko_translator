@@ -60,6 +60,14 @@ _THAT_CLAUSE_MARKER_RE = re.compile(r"(라고|라는|다고|다는|하면|된다
 _RELATIVE_CLAUSE_MARKER_RE = re.compile(r"(하는|되는|했던|였던|인|할|될|보여주는|가지는)")
 _COMPARISON_MARKER_RE = re.compile(r"(처럼|같이|보다|만큼|에 비해|와 달리|대신)")
 _CONTINUATION_TAIL_RE = re.compile(r"(으로|에서|와|과|로|에|의|중|부터|까지|하며|하면서|한 채|및)$")
+_PURPOSE_TAIL_NORMALIZATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"기 위해서(?:입니다|인 거죠|인 겁니다|이죠|예요|에요|요)?(?:[.!?\"'”’),，、\s]*)$"), "기 위해"),
+    (re.compile(r"기 위해(?:입니다|인 거죠|인 겁니다|이죠|예요|에요|요)?(?:[.!?\"'”’),，、\s]*)$"), "기 위해"),
+    (re.compile(r"기 위한(?:\s*(?:것입니다|것이죠|것이에요|겁니다|거죠|거예요|거에요))?(?:[.!?\"'”’),，、\s]*)$"), "기 위해"),
+    (re.compile(r"(하려고)(?:\s*(?:합니다|한 것입니다|한 거죠|한 겁니다|해요|했어요))?(?:[.!?\"'”’),，、\s]*)$"), r"\1"),
+    (re.compile(r"(하도록)(?:\s*(?:합니다|한 것입니다|한 거죠|한 겁니다|해요|했어요))?(?:[.!?\"'”’),，、\s]*)$"), r"\1"),
+    (re.compile(r"(하려면)(?:\s*(?:됩니다|합니다|하는 겁니다|하는 거죠))?(?:[.!?\"'”’),，、\s]*)$"), r"\1"),
+)
 
 
 def create_glossary_store(config: RuntimeConfig, glossary_log_path: Optional[str] = None) -> GlossaryStore:
@@ -341,6 +349,69 @@ def _remove_tail_once(text: str, span_text: str) -> str:
     pattern = re.compile(rf"{re.escape(target)}\s*$")
     updated = pattern.sub("", normalized, count=1).rstrip(" ,，")
     return normalize_text(updated)
+
+
+def _normalize_purpose_tail_fragment(text: str) -> str:
+    normalized = normalize_text(text)
+    if not normalized:
+        return normalized
+    updated = normalized
+    for pattern, replacement in _PURPOSE_TAIL_NORMALIZATION_PATTERNS:
+        candidate = normalize_text(pattern.sub(replacement, updated, count=1))
+        if candidate != updated:
+            updated = candidate
+            break
+    return updated.rstrip(" ,，")
+
+
+def _apply_purpose_tail_post_normalization(
+    candidate_result: PhaseTranslationResult,
+    offending_spans: Sequence[dict],
+) -> tuple[PhaseTranslationResult, List[dict]]:
+    purpose_spans = [
+        span
+        for span in offending_spans
+        if span.get("preferred_action") == "restore_missing_tail" and span.get("source_tail_type") == "purpose_tail"
+    ]
+    if not purpose_spans:
+        return candidate_result, []
+
+    text_by_index = {cue.cue_index: normalize_text(cue.text) for cue in candidate_result.emitted_cues}
+    applied: List[dict] = []
+    for span in purpose_spans:
+        cue_index = span.get("cue_index")
+        if not isinstance(cue_index, int):
+            continue
+        current_text = text_by_index.get(cue_index, "")
+        if not current_text:
+            continue
+        normalized = _normalize_purpose_tail_fragment(current_text)
+        if normalized and normalized != current_text:
+            text_by_index[cue_index] = normalized
+            applied.append(
+                {
+                    "cue_index": cue_index,
+                    "before": current_text,
+                    "after": normalized,
+                    "source_tail_type": "purpose_tail",
+                    "preferred_action": "restore_missing_tail",
+                    "normalization": "purpose_tail_fragment",
+                }
+            )
+
+    if not applied:
+        return candidate_result, []
+
+    return (
+        PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=cue.cue_index, text=text_by_index.get(cue.cue_index, normalize_text(cue.text)))
+                for cue in candidate_result.emitted_cues
+            ],
+            risk_flags=list(candidate_result.risk_flags),
+        ),
+        applied,
+    )
 
 
 def _apply_deterministic_style_micro_edits(
@@ -971,9 +1042,14 @@ def _translate_block_recursive(
                 metrics,
             )
             if strict_phase1 is not None:
+                strict_phase1, strict_post_normalizations = _apply_purpose_tail_post_normalization(
+                    strict_phase1,
+                    offending_spans,
+                )
                 if metrics:
                     metrics.style_retry_trace["strict_candidate_emitted_cues"] = _serialize_emitted_cues(strict_phase1)
                     metrics.style_retry_trace["strict_candidate_risk_flags"] = list(strict_phase1.risk_flags)
+                    metrics.style_retry_trace["strict_candidate_post_normalizations"] = list(strict_post_normalizations)
                     metrics.style_retry_trace["accepted"] = False
                 strict_pre = pre_wrap_gate(block, strict_phase1.emitted_cues, glossary_terms, config)
                 wrapped_strict = _wrap_phase_result(block, strict_phase1, config, metrics)
@@ -1025,12 +1101,14 @@ def _translate_block_recursive(
                 metrics.note_style_action_outcome(offending_spans, False, channel="strict_retry")
                 metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
                 metrics.style_retry_trace["strict_candidate_risk_flags"] = []
+                metrics.style_retry_trace["strict_candidate_post_normalizations"] = []
                 metrics.style_retry_trace["accepted"] = False
                 metrics.style_retry_trace["rejection_causes"] = list(strict_retry_failures)
                 metrics.add_style_retry_rejection_causes(strict_retry_failures)
         elif metrics:
             metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
             metrics.style_retry_trace["strict_candidate_risk_flags"] = []
+            metrics.style_retry_trace["strict_candidate_post_normalizations"] = []
             metrics.style_retry_trace["accepted"] = False
             metrics.style_retry_trace["rejection_causes"] = ["resolved_by_micro_edit"]
 

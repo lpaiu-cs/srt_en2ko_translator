@@ -88,6 +88,19 @@ python3 build_restore_tail_stress_set.py \
   --per-tail-type 4
 ```
 
+There is also a runtime replay builder for real `restore_missing_tail` cases that actually surfaced in previous translated eval outputs:
+
+```bash
+python3 build_restore_tail_replay_set.py \
+  --inputs \
+    evaluation/cs231n_sp25_eval_random40_translated_round11_repair_off.jsonl \
+    evaluation/cs231n_sp25_eval_random40_translated_round12_style_microedit.jsonl \
+    evaluation/cs231n_sp25_eval_random40_translated_round13b_tailaware.jsonl \
+  --output evaluation/cs231n_sp25_restore_missing_tail_replay.jsonl
+```
+
+This replay set is not a coverage set. It is meant to benchmark actual `restore_missing_tail` selector decisions with preserved offending/protected cue metadata.
+
 For larger frozen evals where synchronous rate limits add noise, use the Batch lane:
 
 ```bash
