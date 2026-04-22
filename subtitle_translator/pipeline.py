@@ -11,7 +11,7 @@ from .config import RuntimeConfig
 from .glossary import GlossaryStore
 from .metrics import TranslationMetrics
 from .models import Cue, EmittedCue, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
-from .quality import post_wrap_gate, pre_wrap_gate, validate_phase_structure
+from .quality import _looks_like_duplicate_proposition, post_wrap_gate, pre_wrap_gate, validate_phase_structure
 from .text import normalize_text, warn, wrap_lines, wrap_lines_candidates
 from .translators import BaseTranslator
 
