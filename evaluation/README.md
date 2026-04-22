@@ -66,3 +66,24 @@ python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jso
 ```
 
 Use frozen-block mode when the variable under test is prompt/profile/model behavior rather than block-boundary changes.
+
+For larger frozen evals where synchronous rate limits add noise, use the Batch lane:
+
+```bash
+python3 run_review_eval_batch.py prepare-phase1 \
+  --input evaluation/cs231n_sp25_eval_hard40_boundary_aware.jsonl \
+  --requests-out evaluation/batch/hard40_phase1_requests.jsonl \
+  --manifest-out evaluation/batch/hard40_phase1_manifest.jsonl \
+  --phase1-temperature 0.0 \
+  --prompt-profile fragment_preserving_v2
+python3 run_review_eval_batch.py submit --input-jsonl evaluation/batch/hard40_phase1_requests.jsonl
+python3 run_review_eval_batch.py prepare-style-retry \
+  --phase1-manifest evaluation/batch/hard40_phase1_manifest.jsonl \
+  --phase1-output evaluation/batch/hard40_phase1_output.jsonl \
+  --requests-out evaluation/batch/hard40_strict_requests.jsonl \
+  --manifest-out evaluation/batch/hard40_retry_manifest.jsonl
+python3 run_review_eval_batch.py finalize \
+  --retry-manifest evaluation/batch/hard40_retry_manifest.jsonl \
+  --strict-output evaluation/batch/hard40_strict_output.jsonl \
+  --output evaluation/cs231n_sp25_eval_hard40_translated_batch.jsonl
+```

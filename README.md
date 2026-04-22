@@ -64,6 +64,7 @@ python3 -m pip install requests
 - `SRT_GLOSSARY_MAX_TERMS`: max glossary entries injected per request.
 - `SRT_ALLOWED_ENGLISH_TERMS`: comma-separated technical terms allowed to remain in output.
 - `SRT_REQUEST_TIMEOUT`: request timeout in seconds.
+- `SRT_REQUEST_MAX_ATTEMPTS`, `SRT_REQUEST_BACKOFF_MIN_SECONDS`, `SRT_REQUEST_BACKOFF_MAX_SECONDS`: synchronous debug/eval retry backoff for rate limits and transient server errors.
 - `SRT_BLOCK_MIN_CUES`, `SRT_BLOCK_MAX_CUES`, `SRT_BLOCK_MAX_DURATION_MS`, `SRT_BLOCK_MAX_SOURCE_CHARS`, `SRT_BLOCK_MAX_GAP_MS`: block builder controls.
 - `SRT_MAX_CHARS_PER_LINE`, `SRT_MAX_LINES_PER_CUE`, `SRT_MAX_CPS`: readability thresholds.
 
@@ -113,6 +114,32 @@ For prompt A/B runs, freeze the original block boundaries and lower Phase1 tempe
 
 ```bash
 python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v2
+```
+
+For larger frozen-block evals, keep synchronous replay for micro debugging and use the Batch lane for clean rate-limit isolation:
+
+```bash
+python3 run_review_eval_batch.py prepare-phase1 \
+  --input evaluation/cs231n_sp25_eval_hard40_boundary_aware.jsonl \
+  --requests-out evaluation/batch/hard40_phase1_requests.jsonl \
+  --manifest-out evaluation/batch/hard40_phase1_manifest.jsonl \
+  --phase1-temperature 0.0 \
+  --prompt-profile fragment_preserving_v2
+```
+
+Then upload/create the batch, download the phase1 output, prepare the strict-retry batch, and finalize:
+
+```bash
+python3 run_review_eval_batch.py submit --input-jsonl evaluation/batch/hard40_phase1_requests.jsonl
+python3 run_review_eval_batch.py prepare-style-retry \
+  --phase1-manifest evaluation/batch/hard40_phase1_manifest.jsonl \
+  --phase1-output evaluation/batch/hard40_phase1_output.jsonl \
+  --requests-out evaluation/batch/hard40_strict_requests.jsonl \
+  --manifest-out evaluation/batch/hard40_retry_manifest.jsonl
+python3 run_review_eval_batch.py finalize \
+  --retry-manifest evaluation/batch/hard40_retry_manifest.jsonl \
+  --strict-output evaluation/batch/hard40_strict_output.jsonl \
+  --output evaluation/cs231n_sp25_eval_hard40_translated_batch.jsonl
 ```
 
 The translated eval JSONL records provenance (`phase1_model`, `repair_model`, temperatures, `prompt_profile`, `git_sha`) together with block lint state and captured Phase1 risk flags. Current manual review tags are centered on translation behavior rather than the older grouping-only pass:

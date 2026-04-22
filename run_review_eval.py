@@ -312,6 +312,7 @@ def main() -> int:
                     "post_wrap_failures": metrics.post_wrap_failures,
                     "phase1_risk_flags": dict(metrics.phase1_risk_flags),
                     "strict_retry_candidate_risk_flags": dict(metrics.strict_retry_candidate_risk_flags),
+                    "style_retry_rejection_causes": dict(metrics.style_retry_rejection_causes),
                     "captured_phase1_risk_flags": sorted(set(tracing_translator.phase1_risk_flags)),
                     "average_cps": round(metrics.average_cps(), 3),
                     "style_retry_trace": metrics.style_retry_trace,

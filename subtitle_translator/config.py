@@ -87,6 +87,9 @@ class RuntimeConfig:
     metrics_log_path: Optional[Path]
     glossary_max_terms: int
     request_timeout: int
+    request_max_attempts: int
+    request_backoff_min_seconds: float
+    request_backoff_max_seconds: float
     phase1_max_retries: int
     phase2_max_repairs: int
     max_split_depth: int
@@ -124,6 +127,9 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
         metrics_log_path=metrics_path,
         glossary_max_terms=max(1, _env_int("SRT_GLOSSARY_MAX_TERMS", 12)),
         request_timeout=max(1, _env_int("SRT_REQUEST_TIMEOUT", 120)),
+        request_max_attempts=max(1, _env_int("SRT_REQUEST_MAX_ATTEMPTS", 6)),
+        request_backoff_min_seconds=max(0.1, _env_float("SRT_REQUEST_BACKOFF_MIN_SECONDS", 1.0)),
+        request_backoff_max_seconds=max(0.1, _env_float("SRT_REQUEST_BACKOFF_MAX_SECONDS", 30.0)),
         phase1_max_retries=max(1, _env_int("SRT_PHASE1_MAX_RETRIES", 2)),
         phase2_max_repairs=max(1, _env_int("SRT_PHASE2_MAX_REPAIRS", 1)),
         max_split_depth=max(0, _env_int("SRT_MAX_SPLIT_DEPTH", 4)),

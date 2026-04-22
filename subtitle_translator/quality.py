@@ -23,8 +23,12 @@ _EXPLANATORY_CLOSER_RE = re.compile(
 )
 _RESTATEMENT_MARKER_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\b")
 _PROPOSITION_SPLIT_RE = re.compile(r"[.!?]+(?:\s+|$)|[,;:](?:\s*|$)|\s*[—–-]\s+|\n+")
-_TAIL_RESTORE_SOURCE_RE = re.compile(
-    r"^(to\b|that\b|which\b|who\b|whom\b|whose\b|where\b|when\b|why\b|because\b|if\b|while\b|as\b|than\b|rather\b|for\b|by\b|of\b|with\b|without\b|into\b|from\b|in order to\b)",
+_PURPOSE_TAIL_RE = re.compile(r"^(to\b|in order to\b)", re.IGNORECASE)
+_THAT_TAIL_RE = re.compile(r"^(that\b|because\b|if\b|while\b)", re.IGNORECASE)
+_RELATIVE_TAIL_RE = re.compile(r"^(which\b|who\b|whom\b|whose\b|where\b|when\b|why\b)", re.IGNORECASE)
+_COMPARISON_TAIL_RE = re.compile(r"^(as\b|than\b|rather than\b|compared to\b|like\b)", re.IGNORECASE)
+_GENERIC_CONTINUATION_TAIL_RE = re.compile(
+    r"^(for\b|by\b|of\b|with\b|without\b|into\b|from\b)",
     re.IGNORECASE,
 )
 _DISCOURSE_MARKER_HEAD_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\s*[,，]?\s*")
@@ -167,10 +171,6 @@ def _cue_cps(text: str, cue: Cue) -> float:
     return visible_chars / (duration_ms / 1000.0)
 
 
-def _fragment_overclosure_warnings(block: TranslationBlock, tgt_texts: List[str]) -> List[str]:
-    return ["fragment_overclosure"] if _fragment_overclosure_details(block, tgt_texts) else []
-
-
 def _fragment_overclosure_details(block: TranslationBlock, tgt_texts: List[str]) -> List[dict]:
     if "carry_context_only" not in block.lint_actions and "dependent_end" not in block.lint_reasons:
         return []
@@ -183,8 +183,8 @@ def _fragment_overclosure_details(block: TranslationBlock, tgt_texts: List[str])
                 {
                     "cue_index": cue.index,
                     "span_text": match.group(0),
-                    "issue": "fragment_overclosure",
-                    "preferred_action": "keep_fragment_open",
+                    "issue": "unsupported_explanatory_tail",
+                    "preferred_action": "trim_explanatory_tail",
                 }
             )
         discourse_match = _DISCOURSE_MARKER_HEAD_RE.match(normalized)
@@ -193,8 +193,8 @@ def _fragment_overclosure_details(block: TranslationBlock, tgt_texts: List[str])
                 {
                     "cue_index": cue.index,
                     "span_text": discourse_match.group(0).strip(),
-                    "issue": "fragment_overclosure",
-                    "preferred_action": "keep_fragment_open",
+                    "issue": "unsupported_head_marker",
+                    "preferred_action": "drop_head_marker",
                 }
             )
     return details
@@ -279,9 +279,21 @@ def _proposition_entries(emitted_cues: List[EmittedCue]) -> List[dict]:
     return entries
 
 
-def _source_cue_prefers_tail_restore(source_text: str) -> bool:
+def _source_tail_type(source_text: str) -> str | None:
     normalized = normalize_text(source_text)
-    return bool(normalized and _TAIL_RESTORE_SOURCE_RE.match(normalized))
+    if not normalized:
+        return None
+    if _PURPOSE_TAIL_RE.match(normalized):
+        return "purpose_tail"
+    if _THAT_TAIL_RE.match(normalized):
+        return "that_clause_tail"
+    if _RELATIVE_TAIL_RE.match(normalized):
+        return "relative_clause_tail"
+    if _COMPARISON_TAIL_RE.match(normalized):
+        return "comparison_tail"
+    if _GENERIC_CONTINUATION_TAIL_RE.match(normalized):
+        return "continuation_tail"
+    return None
 
 
 def _duplicate_restatement_details(
@@ -312,11 +324,33 @@ def _duplicate_restatement_details(
         if len(left_text) < 6 or len(right_text) < 6:
             continue
         right_source_text = source_cue_map.get(right["cue_index"], "")
+        source_tail_type = _source_tail_type(right_source_text)
         preferred_action = (
             "restore_missing_tail"
-            if left["cue_index"] != right["cue_index"] and _source_cue_prefers_tail_restore(right_source_text)
+            if left["cue_index"] != right["cue_index"] and source_tail_type
             else "delete_repeat_local"
         )
+        if (
+            preferred_action == "restore_missing_tail"
+            and right["cue_index"] >= 0
+            and right_text
+            and right_text in left_text
+            and len(right_text) >= 8
+        ):
+            details.append(
+                {
+                    "cue_index": right["cue_index"],
+                    "cue_indices": [left["cue_index"], right["cue_index"]],
+                    "span_text": right["span_text"],
+                    "left_text": left_text,
+                    "right_text": right_text,
+                    "source_cue_text": right_source_text,
+                    "source_tail_type": source_tail_type,
+                    "issue": "duplicate_restatement",
+                    "preferred_action": preferred_action,
+                }
+            )
+            continue
         if source_clause_count <= 1 and _RESTATEMENT_MARKER_RE.match(right_text):
             details.append(
                 {
@@ -326,6 +360,7 @@ def _duplicate_restatement_details(
                     "left_text": left_text,
                     "right_text": right_text,
                     "source_cue_text": right_source_text,
+                    "source_tail_type": source_tail_type,
                     "issue": "duplicate_restatement",
                     "preferred_action": preferred_action,
                 }
@@ -340,6 +375,7 @@ def _duplicate_restatement_details(
                     "left_text": left_text,
                     "right_text": right_text,
                     "source_cue_text": right_source_text,
+                    "source_tail_type": source_tail_type,
                     "issue": "duplicate_restatement",
                     "preferred_action": preferred_action,
                 }
@@ -397,8 +433,9 @@ def pre_wrap_gate(
     warnings.extend(english_warn)
     fragment_details = _fragment_overclosure_details(block, tgt_texts)
     if fragment_details:
-        warnings.append("fragment_overclosure")
-        warning_details["fragment_overclosure"] = fragment_details
+        for issue in _unique(detail["issue"] for detail in fragment_details):
+            warnings.append(issue)
+            warning_details[issue] = [detail for detail in fragment_details if detail["issue"] == issue]
     duplicate_details = _duplicate_restatement_details(
         source_text,
         output_text,

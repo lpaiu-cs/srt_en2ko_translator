@@ -37,12 +37,14 @@ BOUNDARY_SENSITIVE_REPAIR_REASONS = {
 }
 
 STYLE_WARNING_REASONS = {
-    "fragment_overclosure",
+    "unsupported_head_marker",
+    "unsupported_explanatory_tail",
     "duplicate_restatement",
 }
 
 STYLE_RISK_TO_REASON = {
-    "fragment_overclosure_risk": "fragment_overclosure",
+    "unsupported_head_marker_risk": "unsupported_head_marker",
+    "unsupported_explanatory_tail_risk": "unsupported_explanatory_tail",
     "duplicate_restatement_risk": "duplicate_restatement",
 }
 
@@ -200,7 +202,8 @@ def _style_retry_feedback(
     offending_spans: List[dict] = []
     preferred_actions: List[str] = []
     default_actions = {
-        "fragment_overclosure": "keep_fragment_open",
+        "unsupported_head_marker": "drop_head_marker",
+        "unsupported_explanatory_tail": "trim_explanatory_tail",
         "duplicate_restatement": "delete_repeat_local",
     }
     seen_spans: set[str] = set()
@@ -211,11 +214,19 @@ def _style_retry_feedback(
             if reason == "duplicate_restatement" and len(block.cues) >= 2:
                 tail_cue = block.cues[-1]
                 normalized_tail = tail_cue.text.strip().lower()
+                if normalized_tail.startswith("to "):
+                    source_tail_type = "purpose_tail"
+                elif normalized_tail.startswith(("that ", "because ", "if ", "while ")):
+                    source_tail_type = "that_clause_tail"
+                elif normalized_tail.startswith(("which ", "who ", "whom ", "whose ", "where ", "when ", "why ")):
+                    source_tail_type = "relative_clause_tail"
+                elif normalized_tail.startswith(("as ", "than ", "rather than ", "compared to ", "like ")):
+                    source_tail_type = "comparison_tail"
+                else:
+                    source_tail_type = "continuation_tail" if normalized_tail.startswith(("for ", "by ", "of ", "with ", "without ", "into ", "from ")) else None
                 fallback_action = (
                     "restore_missing_tail"
-                    if normalized_tail.startswith(
-                        ("to ", "that ", "which ", "who ", "where ", "when ", "because ", "if ", "while ", "as ", "than ", "for ", "by ", "of ")
-                    )
+                    if source_tail_type
                     else default_actions[reason]
                 )
                 offending_cues.append(tail_cue.index)
@@ -225,6 +236,7 @@ def _style_retry_feedback(
                         "cue_indices": [tail_cue.index],
                         "span_text": "",
                         "source_cue_text": tail_cue.text,
+                        "source_tail_type": source_tail_type,
                         "issue": "duplicate_restatement",
                         "preferred_action": fallback_action,
                     }
@@ -382,7 +394,7 @@ def _run_phase1_style_retry(
     translator: BaseTranslator,
     glossary_terms: list,
     metrics: Optional[TranslationMetrics],
-) -> Optional[PhaseTranslationResult]:
+) -> tuple[Optional[PhaseTranslationResult], List[str]]:
     if metrics:
         metrics.style_retry_invocations += 1
     request = TranslationRequest(
@@ -403,17 +415,17 @@ def _run_phase1_style_retry(
             f"Strict Phase1 retry failed for cues {[cue.index for cue in block.cues]} "
             f"after style warnings {style_retry_reasons}: {exc}"
         )
-        return None
+        return None, ["strict_retry_exception"]
 
     validation = validate_phase_structure(block, retried.emitted_cues)
     if validation.valid:
-        return retried
+        return retried, []
 
     warn(
         f"Strict Phase1 retry returned invalid structure for cues {[cue.index for cue in block.cues]}: "
         f"{', '.join(validation.reasons)}"
     )
-    return None
+    return None, [f"strict_retry_{reason}" for reason in validation.reasons]
 
 
 def _changed_chars(left: str, right: str) -> int:
@@ -502,31 +514,45 @@ def _choose_better_style_candidate(
     style_retry_reasons: Sequence[str],
     protected_cue_indices: Sequence[int],
 ):
+    rejection_causes: List[str] = []
     if protected_cue_indices:
         changed_protected = set(_changed_cue_indices(current_result, candidate_result)) & set(protected_cue_indices)
         if changed_protected:
-            return current_result, current_pre, current_post, False
+            rejection_causes.append("protected_cue_touched")
+            return current_result, current_pre, current_post, False, rejection_causes
 
     current_repair_reasons = _gate_repair_reason_set(current_pre, current_post)
     candidate_repair_reasons = _gate_repair_reason_set(candidate_pre, candidate_post)
     if candidate_repair_reasons - current_repair_reasons:
-        return current_result, current_pre, current_post, False
+        rejection_causes.append("new_repair_reason_introduced")
+        return current_result, current_pre, current_post, False, rejection_causes
     if _post_wrap_score(candidate_post) > _post_wrap_score(current_post):
-        return current_result, current_pre, current_post, False
+        rejection_causes.append("post_wrap_regression")
+        return current_result, current_pre, current_post, False, rejection_causes
 
     current_targeted = _gate_warning_occurrences(current_pre, current_post, style_retry_reasons)
     candidate_targeted = _gate_warning_occurrences(candidate_pre, candidate_post, style_retry_reasons)
     current_risk_targeted = _style_risk_occurrences(current_result, style_retry_reasons)
     candidate_risk_targeted = _style_risk_occurrences(candidate_result, style_retry_reasons)
     if candidate_targeted < current_targeted:
-        return candidate_result, candidate_pre, candidate_post, True
+        return candidate_result, candidate_pre, candidate_post, True, []
     if candidate_targeted == current_targeted and candidate_risk_targeted < current_risk_targeted:
-        return candidate_result, candidate_pre, candidate_post, True
+        return candidate_result, candidate_pre, candidate_post, True, []
 
     if candidate_targeted == current_targeted and _gate_score(candidate_pre, candidate_post) < _gate_score(current_pre, current_post):
-        return candidate_result, candidate_pre, candidate_post, True
+        return candidate_result, candidate_pre, candidate_post, True, []
 
-    return current_result, current_pre, current_post, False
+    if candidate_targeted >= current_targeted:
+        rejection_causes.append("no_targeted_style_reduction")
+        for reason in style_retry_reasons:
+            current_reason_count = _gate_warning_occurrences(current_pre, current_post, [reason])
+            candidate_reason_count = _gate_warning_occurrences(candidate_pre, candidate_post, [reason])
+            if candidate_reason_count >= current_reason_count and current_reason_count > 0:
+                rejection_causes.append(f"{reason}_persisted")
+    if candidate_risk_targeted >= current_risk_targeted and current_risk_targeted > 0:
+        rejection_causes.append("style_risk_not_reduced")
+
+    return current_result, current_pre, current_post, False, list(dict.fromkeys(rejection_causes))
 
 
 def _serialize_emitted_cues(result: PhaseTranslationResult) -> List[dict]:
@@ -649,7 +675,7 @@ def _translate_block_recursive(
                 "preferred_actions": list(preferred_actions),
                 "base_phase1_emitted_cues": _serialize_emitted_cues(phase1_result),
             }
-        strict_phase1 = _run_phase1_style_retry(
+        strict_phase1, strict_retry_failures = _run_phase1_style_retry(
             block,
             phase1_result,
             style_retry_reasons,
@@ -682,12 +708,15 @@ def _translate_block_recursive(
             ):
                 if metrics:
                     metrics.style_retry_rejected += 1
+                    metrics.add_style_retry_rejection_causes(["overedited_candidate"])
                 warn(
                     f"Rejected strict style retry for cues {[cue.index for cue in block.cues]} "
                     f"after style warnings {style_retry_reasons}"
                 )
+                if metrics.style_retry_trace:
+                    metrics.style_retry_trace["rejection_causes"] = ["overedited_candidate"]
             else:
-                final_result, final_pre, final_post, accepted = _choose_better_style_candidate(
+                final_result, final_pre, final_post, accepted, rejection_causes = _choose_better_style_candidate(
                     final_result,
                     final_pre,
                     final_post,
@@ -702,11 +731,15 @@ def _translate_block_recursive(
                         metrics.style_retry_accepted += 1
                     else:
                         metrics.style_retry_rejected += 1
+                        metrics.add_style_retry_rejection_causes(rejection_causes)
                     metrics.style_retry_trace["accepted"] = accepted
+                    metrics.style_retry_trace["rejection_causes"] = rejection_causes
         elif metrics:
             metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
             metrics.style_retry_trace["strict_candidate_risk_flags"] = []
             metrics.style_retry_trace["accepted"] = False
+            metrics.style_retry_trace["rejection_causes"] = list(strict_retry_failures)
+            metrics.add_style_retry_rejection_causes(strict_retry_failures)
 
     if metrics:
         metrics.add_phase1_risk_flags(final_result.risk_flags)

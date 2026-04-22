@@ -2,6 +2,7 @@ from .config import RuntimeConfig, load_runtime_config, positive_int
 from .blocks import hydrate_translation_block
 from .glossary import GlossaryStore
 from .metrics import TranslationMetrics, append_metrics_log
+from .openai_batch import OpenAIBatchClient
 from .models import (
     Cue,
     EmittedCue,
@@ -27,6 +28,7 @@ __all__ = [
     "GlossaryStore",
     "hydrate_translation_block",
     "OpenAIChatTranslator",
+    "OpenAIBatchClient",
     "PhaseTranslationResult",
     "QualityGateResult",
     "RepairRequest",

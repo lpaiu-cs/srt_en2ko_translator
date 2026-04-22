@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import random
+import time
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any, Dict, List
 
 import requests
 
@@ -12,7 +14,8 @@ from .splitting import ts_to_ms
 from .text import compact_spaces, normalize_text
 
 RISK_FLAG_ENUM = [
-    "fragment_overclosure_risk",
+    "unsupported_head_marker_risk",
+    "unsupported_explanatory_tail_risk",
     "duplicate_restatement_risk",
     "english_residual_risk",
     "line_readability_risk",
@@ -123,7 +126,7 @@ def _phase1_examples_v1() -> List[tuple[dict, dict]]:
             },
             {
                 "emitted_cues": [
-                    {"cue_index": 201, "text": "13% 또는 0.13입니다."}
+                    {"cue_index": 201, "text": "13% 또는 0.13"}
                 ],
                 "risk_flags": [],
             },
@@ -495,7 +498,7 @@ def _phase1_example_messages(prompt_profile: str, strict_style_retry: bool = Fal
             },
             "style_retry": {
                 "strict_retry": True,
-                "retry_reasons": ["fragment_overclosure", "duplicate_restatement"],
+                "retry_reasons": ["unsupported_explanatory_tail", "duplicate_restatement"],
                 "bad_output_to_avoid": "그리고 그 학습이 끝나면, 여러분이 봤던 같은 2단계 파이프라인을 따른다는 겁니다. 같은 파이프라인을 따르게 되는 거죠.",
                 "note": "On a strict retry, remove both the explanatory closure and the repeated paraphrase.",
             },
@@ -530,6 +533,40 @@ def _phase1_example_messages(prompt_profile: str, strict_style_retry: bool = Fal
         }
         messages.append({"role": "user", "content": json.dumps(strict_user, ensure_ascii=False)})
         messages.append({"role": "assistant", "content": json.dumps(strict_assistant, ensure_ascii=False)})
+        strict_head_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": ["dependent_end"],
+                "lint_actions": ["carry_context_only"],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["unsupported_head_marker"],
+                "bad_output_to_avoid": "즉, 이런 컨볼루션 레이어들은",
+                "note": "Delete the unsupported discourse marker head and keep the fragment open.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 541,
+                    "start": "00:00:19,000",
+                    "end": "00:00:20,100",
+                    "text": "So these are convolution layers that",
+                    "duration_ms": 1100,
+                    "gap_after_ms": 0,
+                }
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+        }
+        strict_head_assistant = {
+            "emitted_cues": [
+                {"cue_index": 541, "text": "이런 컨볼루션 레이어들은"}
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_head_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_head_assistant, ensure_ascii=False)})
     return messages
 
 
@@ -556,6 +593,7 @@ def build_phase1_system_prompt(
         "If lint_flags include qa_fragment, keep acknowledgements short and do not expand or duplicate them.",
         "If lint_flags include numeric_orphan, preserve numbers, ratios, symbols, and abbreviations exactly and do not add surrounding explanation.",
         "If lint_actions include carry_context_only, keep the current cue boundary and translate as a context-dependent fragment instead of forcing full local completeness.",
+        "For fragmentary blocks, do not add unsupported discourse-marker heads such as '즉,' or '다시 말해,' unless the source directly supports them.",
         "For fragmentary blocks, do not add generic explanatory closings such as '...라는 뜻입니다', '...거죠', '...겁니다', or '...라고 볼 수 있습니다' unless the source directly supports them.",
         "Do not restate the same meaning twice in a second paraphrastic sentence or clause.",
         f"Allowed risk_flags are: {', '.join(RISK_FLAG_ENUM)}.",
@@ -570,9 +608,11 @@ def build_phase1_system_prompt(
                 "Do not add a second sentence or clause that only rephrases the first.",
                 "Rewrite only the offending cues or offending spans when possible.",
                 "Keep protected cues unchanged unless preserving them would directly prevent fixing the listed style problem.",
-                "If preferred_actions include keep_fragment_open, delete unsupported trailing explanation instead of replacing it with another explanatory tail.",
+                "If preferred_actions include drop_head_marker, delete the unsupported discourse marker at the cue head and keep the remaining fragment.",
+                "If preferred_actions include trim_explanatory_tail, delete unsupported trailing explanation instead of replacing it with another explanatory tail.",
                 "If preferred_actions include delete_repeat_local, remove the repeated local proposition instead of paraphrasing it again.",
                 "If preferred_actions include restore_missing_tail, rewrite the offending cue so it restores that cue's missing local source meaning instead of repeating the previous cue.",
+                "When offending_spans include source_tail_type, preserve that tail shape. For purpose_tail, that_clause_tail, relative_clause_tail, and comparison_tail, do not force a full copular sentence ending unless the source itself closes the thought.",
                 "Keep unaffected cues as close as possible to the previous anchor-preserving wording.",
             ]
         )
@@ -710,7 +750,7 @@ class OpenAIChatTranslator(BaseTranslator):
             ],
         }
 
-    def _structured_completion(
+    def build_chat_completion_request_body(
         self,
         model: str,
         system_prompt: str,
@@ -719,8 +759,8 @@ class OpenAIChatTranslator(BaseTranslator):
         schema_name: str,
         temperature: float,
         example_messages: List[dict] | None = None,
-    ) -> PhaseTranslationResult:
-        data = {
+    ) -> dict:
+        return {
             "model": model,
             "messages": (
                 [{"role": "system", "content": system_prompt}]
@@ -730,18 +770,8 @@ class OpenAIChatTranslator(BaseTranslator):
             "temperature": temperature,
             "response_format": _build_phase_schema(cue_count=cue_count, schema_name=schema_name),
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = self.session.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=self.config.request_timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
+
+    def parse_chat_completion_response_body(self, payload: dict) -> PhaseTranslationResult:
         message = payload["choices"][0]["message"]
         if message.get("refusal"):
             raise RuntimeError(f"Model refused request: {message['refusal']}")
@@ -757,9 +787,9 @@ class OpenAIChatTranslator(BaseTranslator):
         risk_flags = [normalize_text(str(flag)) for flag in parsed.get("risk_flags", []) if normalize_text(str(flag))]
         return PhaseTranslationResult(emitted_cues=emitted_cues, risk_flags=list(dict.fromkeys(risk_flags)))
 
-    def translate_block(self, request: TranslationRequest) -> PhaseTranslationResult:
+    def build_phase1_request_body(self, request: TranslationRequest) -> dict:
         strict_style_retry = request.strict_style_retry
-        return self._structured_completion(
+        return self.build_chat_completion_request_body(
             model=self.phase1_model,
             system_prompt=(
                 build_phase1_system_prompt(
@@ -775,6 +805,97 @@ class OpenAIChatTranslator(BaseTranslator):
             schema_name="subtitle_phase1_strict" if strict_style_retry else "subtitle_phase1",
             temperature=0.0 if strict_style_retry else self.config.phase1_temperature,
             example_messages=self.phase1_strict_example_messages if strict_style_retry else self.phase1_example_messages,
+        )
+
+    def build_repair_request_body(self, request: RepairRequest) -> dict:
+        return self.build_chat_completion_request_body(
+            model=self.repair_model,
+            system_prompt=self.repair_system_prompt,
+            payload=self._payload_for_repair(request),
+            cue_count=len(request.block.cues),
+            schema_name="subtitle_phase2_repair",
+            temperature=self.config.repair_temperature,
+        )
+
+    def _structured_completion(
+        self,
+        model: str,
+        system_prompt: str,
+        payload: dict,
+        cue_count: int,
+        schema_name: str,
+        temperature: float,
+        example_messages: List[dict] | None = None,
+    ) -> PhaseTranslationResult:
+        data = self.build_chat_completion_request_body(
+            model=model,
+            system_prompt=system_prompt,
+            payload=payload,
+            cue_count=cue_count,
+            schema_name=schema_name,
+            temperature=temperature,
+            example_messages=example_messages,
+        )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        last_exc: Exception | None = None
+        for attempt in range(self.config.request_max_attempts):
+            try:
+                response = self.session.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=data,
+                    timeout=self.config.request_timeout,
+                )
+                if response.status_code in {429, 500, 502, 503, 504}:
+                    retry_after = response.headers.get("retry-after")
+                    base_delay = min(
+                        self.config.request_backoff_max_seconds,
+                        self.config.request_backoff_min_seconds * (2 ** attempt),
+                    )
+                    jitter_delay = random.uniform(
+                        self.config.request_backoff_min_seconds,
+                        max(self.config.request_backoff_min_seconds, base_delay),
+                    )
+                    delay = float(retry_after) if retry_after else jitter_delay
+                    if attempt + 1 >= self.config.request_max_attempts:
+                        response.raise_for_status()
+                    time.sleep(delay)
+                    continue
+                response.raise_for_status()
+                return self.parse_chat_completion_response_body(response.json())
+            except requests.HTTPError as exc:
+                last_exc = exc
+                raise
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt + 1 >= self.config.request_max_attempts:
+                    raise
+                base_delay = min(
+                    self.config.request_backoff_max_seconds,
+                    self.config.request_backoff_min_seconds * (2 ** attempt),
+                )
+                time.sleep(
+                    random.uniform(
+                        self.config.request_backoff_min_seconds,
+                        max(self.config.request_backoff_min_seconds, base_delay),
+                    )
+                )
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Structured completion failed without a concrete exception.")
+
+    def translate_block(self, request: TranslationRequest) -> PhaseTranslationResult:
+        return self._structured_completion(
+            model=self.phase1_model,
+            system_prompt=self.build_phase1_request_body(request)["messages"][0]["content"],
+            payload=self._payload_for_phase1(request),
+            cue_count=len(request.block.cues),
+            schema_name="subtitle_phase1_strict" if request.strict_style_retry else "subtitle_phase1",
+            temperature=0.0 if request.strict_style_retry else self.config.phase1_temperature,
+            example_messages=self.phase1_strict_example_messages if request.strict_style_retry else self.phase1_example_messages,
         )
 
     def repair_block(self, request: RepairRequest) -> PhaseTranslationResult:
