@@ -58,6 +58,8 @@ python3 -m pip install requests
 - `SRT_TRANSLATION_STYLE`: optional tone/style hint.
 - `SRT_USE_CONTEXT_WINDOW`: whether to provide left/right source context.
 - `SRT_ENABLE_REPAIR`: enables bounded Phase2 repair.
+- `SRT_REPAIR_POLICY`: repair policy variant. `baseline` keeps current bounded repair behavior; `compact_technical_fragment_v1` only targets single-cue dependent-end technical fragments with `line_overflow`.
+- `SRT_ENGLISH_RESIDUAL_POLICY`: `coarse` keeps the old routing. `technical_split` downgrades allowed technical carry-through to warning-only so repair focuses on actual residual English.
 - `SRT_PHASE1_MAX_RETRIES`, `SRT_PHASE2_MAX_REPAIRS`, `SRT_MAX_SPLIT_DEPTH`: retry and recursion guardrails.
 - `SRT_GLOSSARY_LOG_PATH`: glossary JSONL log path.
 - `SRT_METRICS_LOG_PATH`: per-file JSONL metrics log path.
@@ -66,7 +68,8 @@ python3 -m pip install requests
 - `SRT_REQUEST_TIMEOUT`: request timeout in seconds.
 - `SRT_REQUEST_MAX_ATTEMPTS`, `SRT_REQUEST_BACKOFF_MIN_SECONDS`, `SRT_REQUEST_BACKOFF_MAX_SECONDS`: synchronous debug/eval retry backoff for rate limits and transient server errors.
 - `SRT_BLOCK_MIN_CUES`, `SRT_BLOCK_MAX_CUES`, `SRT_BLOCK_MAX_DURATION_MS`, `SRT_BLOCK_MAX_SOURCE_CHARS`, `SRT_BLOCK_MAX_GAP_MS`: block builder controls.
-- `SRT_MAX_CHARS_PER_LINE`, `SRT_MAX_LINES_PER_CUE`, `SRT_MAX_CPS`: readability thresholds.
+- `SRT_MAX_CHARS_PER_LINE`, `SRT_MAX_LINES_PER_CUE`, `SRT_MAX_CPS`: readability thresholds. Current default line width is `28`, based on shipping-lane wrap A/B against the round40 wrap-readability set.
+- `SRT_WRAP_POLICY`: wrap/readability policy variant. `baseline` keeps current behavior; `cps_relaxed_v1` relaxes only warning-level CPS gating for wrap A/B runs.
 
 ## CS231n Preset
 

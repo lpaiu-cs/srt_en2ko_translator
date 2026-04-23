@@ -236,6 +236,8 @@ python3 build_shipping_failure_corpus.py \
   --output evaluation/cs231n_sp25_shipping_failure_corpus_round37.jsonl
 ```
 
+If you want to keep only rows whose final translated cues still fail the current post-wrap gate, add `--final-postwrap-only`. This is useful when a row was selected only because an intermediate post-wrap failure happened before repair/local re-wrap, but the final emitted cues are already acceptable.
+
 Rows are selected when any of the following is true:
 
 - `repair_invoked && !repair_accepted`

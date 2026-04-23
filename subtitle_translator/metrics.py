@@ -53,6 +53,7 @@ class TranslationMetrics:
     style_action_accept_modes_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_action_tail_accept_modes_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_retry_trace: Dict[str, Any] = field(default_factory=dict)
+    effective_repair_profile: str | None = None
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
     tail_heavy_count: int = 0

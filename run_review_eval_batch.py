@@ -285,8 +285,11 @@ def _provenance(config, args) -> dict:
         "repair_model": args.repair_model or config.repair_model,
         "phase1_temperature": config.phase1_temperature,
         "repair_temperature": config.repair_temperature,
+        "repair_policy": config.repair_policy,
         "prompt_profile": config.phase1_prompt_profile,
         "repair_enabled": False,
+        "wrap_policy": config.wrap_policy,
+        "english_residual_policy": config.english_residual_policy,
         "git_sha": _git_sha(),
         "frozen_block_input": True,
         "openai_base_url": args.openai_base_url,
@@ -846,6 +849,7 @@ def cmd_finalize(args) -> int:
                         style_retry_trace.get("effective_strict_prompt_profile")
                         or style_retry_trace.get("prompt_profile")
                     ),
+                    "effective_repair_profile": row["provenance"].get("repair_policy"),
                     "style_retry_trace": style_retry_trace,
                 },
                 "provenance": {**row["provenance"], **batch_provenance},

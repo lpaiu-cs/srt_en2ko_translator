@@ -775,6 +775,9 @@ def _run_phase2_repair(
         )
         if metrics:
             metrics.repair_invocations += 1
+            repair_profile_fn = getattr(translator, "_effective_repair_profile", None)
+            if callable(repair_profile_fn):
+                metrics.effective_repair_profile = repair_profile_fn(repair_request)
         try:
             repaired = translator.repair_block(repair_request)
         except Exception as exc:

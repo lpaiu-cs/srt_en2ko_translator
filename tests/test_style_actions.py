@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from subtitle_translator.config import load_runtime_config
-from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, TranslationBlock, TranslationRequest
+from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
 from subtitle_translator.pipeline import (
     _apply_deterministic_style_micro_edits,
     _apply_purpose_tail_post_normalization,
@@ -15,7 +15,7 @@ from subtitle_translator.pipeline import (
     _wrap_phase_result,
 )
 from subtitle_translator.quality import post_wrap_gate, pre_wrap_gate
-from subtitle_translator.translators import _splice_offending_cue_rewrites
+from subtitle_translator.translators import _repair_profile_for_request, _splice_offending_cue_rewrites
 
 
 class StyleActionTests(unittest.TestCase):
@@ -251,6 +251,54 @@ class StyleActionTests(unittest.TestCase):
         self.assertEqual(normalized.emitted_cues[0].text, "실제로 진전을 이루기 위해")
         self.assertEqual(applied, [])
 
+    def test_compact_technical_fragment_repair_profile_matches_0404_shape(self) -> None:
+        self.config.repair_policy = "compact_technical_fragment_v1"
+        request = RepairRequest(
+            block=TranslationBlock(
+                cues=[
+                    Cue(
+                        index=405,
+                        start="00:16:50,000",
+                        end="00:16:58,640",
+                        text="So for AlexNet, it takes 0.7 GFLOPS. For VGG-16, it takes like 13.6 GFLOPS. But for C3D,",
+                    )
+                ],
+                lint_reasons=["dependent_end"],
+            ),
+            phase1_result=PhaseTranslationResult(
+                emitted_cues=[
+                    EmittedCue(
+                        cue_index=405,
+                        text="그래서 AlexNet은 0.7 GFLOPS가 필요합니다. VGG-16은 약 13.6 GFLOPS가 필요하고, C3D는",
+                    )
+                ]
+            ),
+            failure_reasons=["line_overflow"],
+        )
+        self.assertEqual(_repair_profile_for_request(self.config, request), "compact_technical_fragment_v1")
+
+    def test_compact_technical_fragment_repair_profile_ignores_nonmatching_rows(self) -> None:
+        self.config.repair_policy = "compact_technical_fragment_v1"
+        request = RepairRequest(
+            block=TranslationBlock(
+                cues=[
+                    Cue(
+                        index=1,
+                        start="00:00:00,000",
+                        end="00:00:03,000",
+                        text="This is just a normal unfinished clause,",
+                    )
+                ],
+                lint_reasons=["dependent_end"],
+            ),
+            phase1_result=PhaseTranslationResult(
+                emitted_cues=[EmittedCue(cue_index=1, text="이건 그냥 일반적인 미완결 절이고,")]
+            ),
+            failure_reasons=["line_overflow"],
+        )
+        self.assertEqual(_repair_profile_for_request(self.config, request), "baseline")
+
+
     def test_restore_missing_tail_rejects_purpose_tail_without_purpose_marker(self) -> None:
         block = TranslationBlock(
             cues=[
@@ -304,6 +352,40 @@ class StyleActionTests(unittest.TestCase):
 
         self.assertFalse(accepted)
         self.assertIn("restore_tail_purpose_marker_missing", rejection_causes)
+
+    def test_technical_split_policy_downgrades_allowed_technical_english(self) -> None:
+        self.config.english_residual_policy = "technical_split"
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="GPT-4 and Adam and RMSProp")],
+        )
+        emitted = [EmittedCue(cue_index=1, text="GPT-4와 Adam, RMSProp")]
+        gate = pre_wrap_gate(block, emitted, [], self.config)
+        self.assertFalse(gate.repair_needed)
+        self.assertIn("english_residual_technical", gate.warning_reasons)
+        self.assertNotIn("english_residual", gate.repair_reasons)
+
+    def test_technical_split_policy_keeps_actual_residual_english_as_repair(self) -> None:
+        self.config.english_residual_policy = "technical_split"
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="we need some weird framework semantics")],
+        )
+        emitted = [EmittedCue(cue_index=1, text="weird framework semantics를 생각해보면")]
+        gate = pre_wrap_gate(block, emitted, [], self.config)
+        self.assertTrue(gate.repair_needed)
+        self.assertIn("english_residual", gate.repair_reasons)
+
+    def test_cps_relaxed_wrap_policy_suppresses_warn_near_threshold(self) -> None:
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:01,000", text="x")],
+        )
+        emitted = [EmittedCue(cue_index=1, text="가" * 19)]
+
+        baseline_gate = pre_wrap_gate(block, emitted, [], self.config)
+        self.assertIn("cps_warn", baseline_gate.warning_reasons)
+
+        self.config.wrap_policy = "cps_relaxed_v1"
+        relaxed_gate = pre_wrap_gate(block, emitted, [], self.config)
+        self.assertNotIn("cps_warn", relaxed_gate.warning_reasons)
 
     def test_continuation_detector_miss_feedback_surfaces_fragmentary_tail(self) -> None:
         block = TranslationBlock(

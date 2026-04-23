@@ -78,6 +78,7 @@ class RuntimeConfig:
     repair_model: str
     phase1_temperature: float
     repair_temperature: float
+    repair_policy: str
     phase1_prompt_profile: str
     translation_context: str
     translation_style: str
@@ -101,7 +102,9 @@ class RuntimeConfig:
     max_chars_per_line: int
     max_lines_per_cue: int
     max_cps: float
+    wrap_policy: str
     allowed_english_terms: list[str]
+    english_residual_policy: str
 
 
 def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfig:
@@ -118,6 +121,7 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
         repair_model=(os.getenv("SRT_REPAIR_MODEL", "gpt-4o").strip() or "gpt-4o"),
         phase1_temperature=max(0.0, _env_float("SRT_PHASE1_TEMPERATURE", 0.1)),
         repair_temperature=max(0.0, _env_float("SRT_REPAIR_TEMPERATURE", 0.1)),
+        repair_policy=(os.getenv("SRT_REPAIR_POLICY", "baseline").strip() or "baseline"),
         phase1_prompt_profile=(os.getenv("SRT_PHASE1_PROMPT_PROFILE", "fragment_preserving_v2").strip() or "fragment_preserving_v2"),
         translation_context=os.getenv("SRT_TRANSLATION_CONTEXT", "").strip(),
         translation_style=os.getenv("SRT_TRANSLATION_STYLE", "").strip(),
@@ -138,15 +142,19 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
         block_max_duration_ms=max(1000, _env_int("SRT_BLOCK_MAX_DURATION_MS", 6500)),
         block_max_source_chars=max(40, _env_int("SRT_BLOCK_MAX_SOURCE_CHARS", 160)),
         block_max_gap_ms=max(0, _env_int("SRT_BLOCK_MAX_GAP_MS", 800)),
-        max_chars_per_line=max(8, _env_int("SRT_MAX_CHARS_PER_LINE", 24)),
+        max_chars_per_line=max(8, _env_int("SRT_MAX_CHARS_PER_LINE", 28)),
         max_lines_per_cue=max(1, _env_int("SRT_MAX_LINES_PER_CUE", 2)),
         max_cps=max(1.0, _env_float("SRT_MAX_CPS", 18.0)),
+        wrap_policy=(os.getenv("SRT_WRAP_POLICY", "baseline").strip() or "baseline"),
         allowed_english_terms=[
             term.strip().casefold()
             for term in os.getenv("SRT_ALLOWED_ENGLISH_TERMS", "PyTorch,NumPy,ResNet,ImageNet,Stanford,CS231n")
             .split(",")
             if term.strip()
         ],
+        english_residual_policy=(
+            os.getenv("SRT_ENGLISH_RESIDUAL_POLICY", "coarse").strip() or "coarse"
+        ),
     )
 
 

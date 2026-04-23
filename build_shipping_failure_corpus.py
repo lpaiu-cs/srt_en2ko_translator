@@ -6,6 +6,10 @@ import json
 from pathlib import Path
 from typing import Iterable, List
 
+from subtitle_translator.config import load_runtime_config
+from subtitle_translator.models import Cue
+from subtitle_translator.quality import post_wrap_gate
+
 
 READABILITY_FAILURES = {
     "line_overflow",
@@ -57,6 +61,32 @@ def _selected(ps: dict) -> bool:
     )
 
 
+def _translated_cues(row: dict) -> list[Cue]:
+    translated = (((row.get("translation_output") or {}).get("translated_cues")) or [])
+    cues: list[Cue] = []
+    for cue in translated:
+        try:
+            cues.append(
+                Cue(
+                    index=int(cue["cue_index"]),
+                    start=str(cue["start"]),
+                    end=str(cue["end"]),
+                    text=str(cue["text"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return []
+    return cues
+
+
+def _final_post_wrap_gate(row: dict):
+    cues = _translated_cues(row)
+    if not cues:
+        return None
+    config = load_runtime_config(glossary_log_path="")
+    return post_wrap_gate(cues, config)
+
+
 def _failure_families(ps: dict) -> list[str]:
     families: list[str] = []
     failure_reasons = set((ps.get("failure_reasons") or {}).keys())
@@ -90,6 +120,7 @@ def _selection_reasons(ps: dict) -> list[str]:
 
 def _shipping_meta(row: dict, source_path: Path) -> dict:
     ps = row.get("pipeline_signals") or {}
+    final_post_gate = _final_post_wrap_gate(row)
     return {
         "benchmarks": [_benchmark_label(source_path)],
         "lanes": [_lane_label(source_path)],
@@ -103,15 +134,20 @@ def _shipping_meta(row: dict, source_path: Path) -> dict:
         "repair_accepted": bool(ps.get("repair_accepted")),
         "smaller_block_fallback": bool(ps.get("smaller_block_fallback")),
         "post_wrap_failure": bool(ps.get("post_wrap_failure")),
+        "final_post_wrap_reasons": final_post_gate.repair_reasons if final_post_gate else [],
+        "final_post_wrap_warnings": final_post_gate.warning_reasons if final_post_gate else [],
     }
 
 
-def collect_rows(inputs: Iterable[Path]) -> list[dict]:
+def collect_rows(inputs: Iterable[Path], *, final_postwrap_only: bool = False) -> list[dict]:
     selected_by_id: dict[str, dict] = {}
     for input_path in inputs:
         for row in _load_rows(input_path):
             ps = row.get("pipeline_signals") or {}
             if not _selected(ps):
+                continue
+            final_post_gate = _final_post_wrap_gate(row)
+            if final_postwrap_only and (final_post_gate is None or not final_post_gate.repair_needed):
                 continue
             row_id = str(row.get("id"))
             current_meta = _shipping_meta(row, input_path)
@@ -155,13 +191,18 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="JSONL output path",
     )
+    parser.add_argument(
+        "--final-postwrap-only",
+        action="store_true",
+        help="Keep only rows whose final translated cues still fail the current post-wrap gate",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     inputs = [Path(value).expanduser() for value in args.inputs]
-    rows = collect_rows(inputs)
+    rows = collect_rows(inputs, final_postwrap_only=args.final_postwrap_only)
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:

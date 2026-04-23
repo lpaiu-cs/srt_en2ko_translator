@@ -42,6 +42,12 @@ class TracingTranslator(BaseTranslator):
         self.repair_risk_flags.extend(result.risk_flags)
         return result
 
+    def _effective_repair_profile(self, request: RepairRequest) -> str | None:
+        repair_profile_fn = getattr(self.inner, "_effective_repair_profile", None)
+        if callable(repair_profile_fn):
+            return repair_profile_fn(request)
+        return None
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the current translator on a reviewed eval-set JSONL.")
@@ -352,8 +358,11 @@ def main() -> int:
         "repair_model": args.repair_model or config.repair_model,
         "phase1_temperature": config.phase1_temperature,
         "repair_temperature": config.repair_temperature,
+        "repair_policy": config.repair_policy,
         "prompt_profile": config.phase1_prompt_profile,
         "repair_enabled": config.repair_enabled,
+        "wrap_policy": config.wrap_policy,
+        "english_residual_policy": config.english_residual_policy,
         "git_sha": _git_sha(),
         "frozen_block_input": args.frozen_blocks,
         "openai_base_url": args.openai_base_url,
@@ -450,6 +459,7 @@ def main() -> int:
                         metrics.style_retry_trace.get("effective_strict_prompt_profile")
                         or metrics.style_retry_trace.get("prompt_profile")
                     ),
+                    "effective_repair_profile": metrics.effective_repair_profile,
                     "style_retry_trace": metrics.style_retry_trace,
                 },
                 "provenance": provenance,

@@ -32,6 +32,22 @@ _GENERIC_CONTINUATION_TAIL_RE = re.compile(
     re.IGNORECASE,
 )
 _DISCOURSE_MARKER_HEAD_RE = re.compile(r"^(즉|다시 말해|다시 말하면|말하자면|바로)\s*[,，]?\s*")
+_TECHNICAL_CAMEL_RE = re.compile(r"^(?:[A-Z][a-z]+(?:Net|GAN)|[A-Z]{2,}[A-Za-z]+(?:Net|GAN|Prop)?|[A-Z][A-Za-z]+Net|[A-Z][A-Za-z]+GAN)$")
+_TECHNICAL_HYPHEN_DIGIT_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9./+-]+$")
+_TECHNICAL_CARRY_THROUGH_HINTS = {
+    "adam",
+    "alexnet",
+    "binning",
+    "c3d",
+    "convnet",
+    "dc-gan",
+    "gan",
+    "gflops",
+    "gpt-4",
+    "rmsprop",
+    "sgd",
+    "vgg-16",
+}
 
 
 def _unique(values: Iterable[str]) -> List[str]:
@@ -108,16 +124,34 @@ def _allowed_english_terms(glossary_terms: List[GlossaryEntry], config: RuntimeC
     return allowed
 
 
+def _is_technical_carry_through_span(span: str, allowed: set[str]) -> bool:
+    span_casefold = span.casefold()
+    if span_casefold in allowed:
+        return True
+    if _ACRONYM_RE.fullmatch(span):
+        return True
+    if span_casefold in _TECHNICAL_CARRY_THROUGH_HINTS:
+        return True
+    if _TECHNICAL_HYPHEN_DIGIT_RE.fullmatch(span):
+        return True
+    if _TECHNICAL_CAMEL_RE.fullmatch(span):
+        return True
+    return False
+
+
 def _english_residual_reasons(output_text: str, glossary_terms: List[GlossaryEntry], config: RuntimeConfig) -> tuple[List[str], List[str]]:
     allowed = _allowed_english_terms(glossary_terms, config)
     spans = []
+    technical_spans = []
     for match in _ENGLISH_SPAN_RE.finditer(output_text):
         span = match.group(0)
-        if span.casefold() in allowed:
-            continue
-        if _ACRONYM_RE.fullmatch(span):
+        if _is_technical_carry_through_span(span, allowed):
+            if config.english_residual_policy == "technical_split" and span.casefold() not in allowed:
+                technical_spans.append(span)
             continue
         spans.append(span)
+    if not spans and technical_spans:
+        return [], ["english_residual_technical"]
     if not spans:
         return [], []
     non_space_chars = len(output_text.replace(" ", "")) or 1
@@ -169,6 +203,12 @@ def _cue_cps(text: str, cue: Cue) -> float:
     visible_chars = len(normalize_text(text).replace(" ", ""))
     duration_ms = _cue_duration_ms(cue)
     return visible_chars / (duration_ms / 1000.0)
+
+
+def _cps_thresholds(config: RuntimeConfig) -> tuple[float, float, float]:
+    if config.wrap_policy == "cps_relaxed_v1":
+        return (config.max_cps + 1.0, config.max_cps + 2.0, config.max_cps + 4.0)
+    return (config.max_cps, config.max_cps + 2.0, config.max_cps + 4.0)
 
 
 def _fragment_overclosure_details(block: TranslationBlock, tgt_texts: List[str]) -> List[dict]:
@@ -446,13 +486,14 @@ def pre_wrap_gate(
         warnings.append("duplicate_restatement")
         warning_details["duplicate_restatement"] = duplicate_details
 
+    warn_threshold, repair_threshold, severe_threshold = _cps_thresholds(config)
     for source_cue, emitted in zip(block.cues, emitted_cues):
         cps = _cue_cps(emitted.text, source_cue)
-        if cps > config.max_cps + 4.0:
+        if cps > severe_threshold:
             repair.append("cps_overflow_severe")
-        elif cps > config.max_cps + 2.0:
+        elif cps > repair_threshold:
             repair.append("cps_overflow")
-        elif cps > config.max_cps:
+        elif cps > warn_threshold:
             warnings.append("cps_warn")
 
     return QualityGateResult(
@@ -475,6 +516,7 @@ def _line_length_balance(lines: List[str]) -> bool:
 def post_wrap_gate(wrapped_cues: List[Cue], config: RuntimeConfig) -> QualityGateResult:
     repair: List[str] = []
     warnings: List[str] = []
+    warn_threshold, repair_threshold, severe_threshold = _cps_thresholds(config)
     for cue in wrapped_cues:
         lines = cue.text.splitlines() if cue.text else []
         if len(lines) > config.max_lines_per_cue:
@@ -487,11 +529,11 @@ def post_wrap_gate(wrapped_cues: List[Cue], config: RuntimeConfig) -> QualityGat
         if lines and not _line_length_balance(lines):
             warnings.append("line_imbalance")
         cps = _cue_cps(cue.text, cue)
-        if cps > config.max_cps + 4.0:
+        if cps > severe_threshold:
             repair.append("cps_overflow_severe")
-        elif cps > config.max_cps + 2.0:
+        elif cps > repair_threshold:
             repair.append("cps_overflow")
-        elif cps > config.max_cps:
+        elif cps > warn_threshold:
             warnings.append("cps_warn")
     return QualityGateResult(
         repair_needed=bool(repair),

@@ -5,6 +5,7 @@ import random
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
+import re
 
 import requests
 
@@ -22,6 +23,19 @@ RISK_FLAG_ENUM = [
     "glossary_uncertain",
     "context_uncertain",
 ]
+
+_REPAIR_TECHNICAL_HINT_RE = re.compile(r"[A-Za-z][A-Za-z0-9./+-]{2,}")
+_REPAIR_TECHNICAL_HINTS = {
+    "alexnet",
+    "c3d",
+    "convnet",
+    "dc-gan",
+    "gflops",
+    "gpt-4",
+    "rmsprop",
+    "sgd",
+    "vgg-16",
+}
 
 
 def _extract_message_text(content: Any) -> str:
@@ -1423,6 +1437,10 @@ def build_phase1_system_prompt(
 
 
 def build_repair_system_prompt(config: RuntimeConfig) -> str:
+    return build_repair_system_prompt_for_profile(config, "baseline")
+
+
+def build_repair_system_prompt_for_profile(config: RuntimeConfig, repair_profile: str) -> str:
     parts = [
         "You are a subtitle repair editor performing bounded rewrites only.",
         "Rewrite only enough to improve alignment and readability.",
@@ -1438,11 +1456,89 @@ def build_repair_system_prompt(config: RuntimeConfig) -> str:
         f"Allowed risk_flags are: {', '.join(RISK_FLAG_ENUM)}.",
         "Return only repaired emitted cues and optional risk flags.",
     ]
+    if repair_profile == "compact_technical_fragment_v1":
+        parts.extend(
+            [
+                "For single-cue technical fragments with line overflow, compress repeated predicates into a compact list-like fragment instead of repeating full sentence endings.",
+                "Keep technical model names, numbers, and units exactly.",
+                "Prefer commas, parallel phrasing, or an unfinished fragment ending over repeating '...필요합니다' for every item.",
+                "If the source cue itself is unfinished, keep the repaired cue unfinished rather than forcing a closed sentence.",
+                "The goal is to fit the same meaning into readable subtitle lines with minimal wording.",
+            ]
+        )
     if config.translation_context:
         parts.append(f"Context: {compact_spaces(config.translation_context)}")
     if config.translation_style:
         parts.append(f"Style guidance: {compact_spaces(config.translation_style)}")
     return " ".join(parts)
+
+
+def _repair_profile_for_request(config: RuntimeConfig, request: RepairRequest) -> str:
+    if config.repair_policy != "compact_technical_fragment_v1":
+        return "baseline"
+    if len(request.block.cues) != 1:
+        return "baseline"
+    if "line_overflow" not in request.failure_reasons:
+        return "baseline"
+    if "dependent_end" not in request.block.lint_reasons:
+        return "baseline"
+    source_text = normalize_text(request.block.cues[0].text).casefold()
+    phase1_text = " ".join(normalize_text(cue.text).casefold() for cue in request.phase1_result.emitted_cues)
+    technical_hits = {
+        token.casefold()
+        for token in _REPAIR_TECHNICAL_HINT_RE.findall(f"{source_text} {phase1_text}")
+        if (
+            token.casefold() in _REPAIR_TECHNICAL_HINTS
+            or ("-" in token and any(ch.isdigit() for ch in token))
+            or token.casefold().endswith("flops")
+        )
+    }
+    if len(technical_hits) < 3:
+        return "baseline"
+    return "compact_technical_fragment_v1"
+
+
+def _repair_example_messages(repair_profile: str) -> List[dict]:
+    if repair_profile != "compact_technical_fragment_v1":
+        return []
+    user_payload = {
+        "task": "subtitle_phase2_repair",
+        "boundary_lint": {
+            "lint_flags": ["dependent_end"],
+            "lint_actions": [],
+        },
+        "source_cues": [
+            {
+                "cue_index": 405,
+                "start": "00:00:10,000",
+                "end": "00:00:18,640",
+                "text": "So for AlexNet, it takes 0.7 GFLOPS. For VGG-16, it takes like 13.6 GFLOPS. But for C3D,",
+                "duration_ms": 8640,
+                "gap_after_ms": 0,
+            }
+        ],
+        "phase1_emitted_cues": [
+            {
+                "cue_index": 405,
+                "text": "그래서 AlexNet은 0.7 GFLOPS가 필요합니다. VGG-16은 약 13.6 GFLOPS가 필요하고, C3D는",
+            }
+        ],
+        "failure_reasons": ["line_overflow"],
+        "glossary_terms": [],
+    }
+    assistant_payload = {
+        "emitted_cues": [
+            {
+                "cue_index": 405,
+                "text": "AlexNet은 0.7 GFLOPS,\nVGG-16은 13.6 GFLOPS, C3D는",
+            }
+        ],
+        "risk_flags": [],
+    }
+    return [
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        {"role": "assistant", "content": json.dumps(assistant_payload, ensure_ascii=False)},
+    ]
 
 
 class BaseTranslator(ABC):
@@ -1471,7 +1567,7 @@ class OpenAIChatTranslator(BaseTranslator):
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set. Add it to the environment or .env file.")
         self.phase1_system_prompt = build_phase1_system_prompt(config)
-        self.repair_system_prompt = build_repair_system_prompt(config)
+        self.repair_system_prompt = build_repair_system_prompt_for_profile(config, "baseline")
         self.phase1_example_messages = _phase1_example_messages(config.phase1_prompt_profile)
         self.phase1_strict_example_messages = _phase1_example_messages(
             config.phase1_prompt_profile,
@@ -1483,6 +1579,7 @@ class OpenAIChatTranslator(BaseTranslator):
             strict_style_retry=True,
             strict_retry_mode="offending_cue_only",
         )
+        self.repair_example_messages = _repair_example_messages("baseline")
         self.session = requests.Session()
 
     def _effective_prompt_profile(self, request: TranslationRequest) -> str:
@@ -1503,6 +1600,15 @@ class OpenAIChatTranslator(BaseTranslator):
             strict_style_retry=strict_style_retry,
             strict_retry_mode=strict_retry_mode,
         )
+
+    def _effective_repair_profile(self, request: RepairRequest) -> str:
+        return _repair_profile_for_request(self.config, request)
+
+    def _repair_example_messages_for_request(self, request: RepairRequest) -> List[dict]:
+        repair_profile = self._effective_repair_profile(request)
+        if repair_profile == "baseline":
+            return self.repair_example_messages
+        return _repair_example_messages(repair_profile)
 
     def _payload_for_phase1(self, request: TranslationRequest) -> dict:
         block = request.block
@@ -1665,15 +1771,21 @@ class OpenAIChatTranslator(BaseTranslator):
         )
 
     def build_repair_request_body(self, request: RepairRequest) -> dict:
+        repair_profile = self._effective_repair_profile(request)
         return self.build_chat_completion_request_body(
             model=self.repair_model,
-            system_prompt=self.repair_system_prompt,
+            system_prompt=(
+                self.repair_system_prompt
+                if repair_profile == "baseline"
+                else build_repair_system_prompt_for_profile(self.config, repair_profile)
+            ),
             payload=self._payload_for_repair(request),
             response_format=_build_phase_schema(
                 cue_count=len(request.block.cues),
                 schema_name="subtitle_phase2_repair",
             ),
             temperature=self.config.repair_temperature,
+            example_messages=self._repair_example_messages_for_request(request),
         )
 
     def _structured_completion_with_parser(
@@ -1812,15 +1924,21 @@ class OpenAIChatTranslator(BaseTranslator):
         )
 
     def repair_block(self, request: RepairRequest) -> PhaseTranslationResult:
+        repair_profile = self._effective_repair_profile(request)
         return self._structured_completion(
             model=self.repair_model,
-            system_prompt=self.repair_system_prompt,
+            system_prompt=(
+                self.repair_system_prompt
+                if repair_profile == "baseline"
+                else build_repair_system_prompt_for_profile(self.config, repair_profile)
+            ),
             payload=self._payload_for_repair(request),
             response_format=_build_phase_schema(
                 cue_count=len(request.block.cues),
                 schema_name="subtitle_phase2_repair",
             ),
             temperature=self.config.repair_temperature,
+            example_messages=self._repair_example_messages_for_request(request),
         )
 
 
