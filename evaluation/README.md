@@ -113,6 +113,7 @@ Replay outputs also expose:
 
 - `replay_transition`: `historical_outcome -> current surface_state -> current accept_mode`
 - `style_retry_rejection_stage`: coarse current-lane stage such as `strict_retry_selector`, `strict_retry_generation`, `strict_retry_postwrap`, `strict_retry_overedit`, or `not_invoked`
+- `effective_strict_prompt_profile`: row-level strict retry prompt profile actually used for that row (`fragment_preserving_v2` or `fragment_preserving_v3`)
 
 ## Continuation Continuation-Selector Branch
 
@@ -172,6 +173,10 @@ Current stable-head policy:
 - subtype watchlists should be harvested separately for:
   - `strict_retry_selector | local_meaning_not_restored`
   - `strict_retry_overedit`
+- reopening thresholds should now be read as:
+  - same subtype
+  - same `effective_strict_prompt_profile`
+  - stable-head evidence count >= 3
 
 Split subtype watchlists with:
 
@@ -182,6 +187,7 @@ python3 collect_continuation_signature_rows.py \
     evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl \
     evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_style_only_eval.jsonl \
     evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_full_pipeline_eval.jsonl \
+  --effective-profiles fragment_preserving_v3 \
   --stages strict_retry_selector \
   --subtypes local_meaning_not_restored \
   --output evaluation/cs231n_sp25_continuation_tail_signature_watchlist_local_meaning.jsonl
@@ -192,6 +198,7 @@ python3 collect_continuation_signature_rows.py \
     evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl \
     evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_style_only_eval.jsonl \
     evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_full_pipeline_eval.jsonl \
+  --effective-profiles fragment_preserving_v3 \
   --stages strict_retry_overedit \
   --output evaluation/cs231n_sp25_continuation_tail_signature_watchlist_overedit.jsonl
 ```

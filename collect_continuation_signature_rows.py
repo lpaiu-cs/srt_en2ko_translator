@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional subset of rejection subtypes to keep (use 'null' for missing subtype)",
     )
+    parser.add_argument(
+        "--effective-profiles",
+        nargs="*",
+        default=None,
+        help="Optional subset of effective strict prompt profiles to keep",
+    )
     return parser
 
 
@@ -77,10 +83,37 @@ def _eval_lane(row: dict[str, Any]) -> str:
     return "full-pipeline" if provenance.get("repair_enabled", True) else "style-only"
 
 
+def _effective_strict_prompt_profile(row: dict[str, Any]) -> str | None:
+    signals = row.get("pipeline_signals") or {}
+    trace = signals.get("style_retry_trace") or {}
+    if trace.get("effective_strict_prompt_profile"):
+        return str(trace["effective_strict_prompt_profile"])
+
+    provenance = row.get("provenance") or {}
+    base_profile = str(provenance.get("prompt_profile") or "fragment_preserving_v2")
+    offending = trace.get("offending_cue_indices") or []
+    protected = trace.get("protected_cue_indices") or []
+    spans = trace.get("offending_spans") or []
+    if (
+        base_profile == "fragment_preserving_v2"
+        and len(offending) == 1
+        and protected
+        and spans
+        and all(
+            span.get("preferred_action") == "restore_missing_tail"
+            and span.get("source_tail_type") == "continuation_tail"
+            for span in spans
+        )
+    ):
+        return "fragment_preserving_v3"
+    return provenance.get("prompt_profile")
+
+
 def _matches(
     row: dict[str, Any],
     stages: set[str] | None = None,
     subtypes: set[str | None] | None = None,
+    effective_profiles: set[str] | None = None,
 ) -> bool:
     if _row_tail_type(row) != "continuation_tail":
         return False
@@ -101,6 +134,8 @@ def _matches(
     if stages is not None and stage not in stages:
         return False
     if subtypes is not None and subtype not in subtypes:
+        return False
+    if effective_profiles is not None and _effective_strict_prompt_profile(row) not in effective_profiles:
         return False
 
     trace = signals.get("style_retry_trace") or {}
@@ -135,6 +170,7 @@ def _signature_row(row: dict[str, Any], source_file: str) -> dict[str, Any]:
         "final_emitted_cues": trace.get("final_emitted_cues"),
         "rejection_causes": trace.get("rejection_causes"),
         "strict_retry_mode": trace.get("strict_retry_mode"),
+        "effective_strict_prompt_profile": _effective_strict_prompt_profile(row),
     }
 
 
@@ -146,6 +182,7 @@ def main() -> int:
     subtype_filter = None
     if args.subtypes:
         subtype_filter = {None if item == "null" else item for item in args.subtypes}
+    effective_profile_filter = set(args.effective_profiles) if args.effective_profiles else None
 
     for source in args.inputs:
         path = Path(source)
@@ -153,7 +190,12 @@ def main() -> int:
             if not line.strip():
                 continue
             row = json.loads(line)
-            if not _matches(row, stages=stage_filter, subtypes=subtype_filter):
+            if not _matches(
+                row,
+                stages=stage_filter,
+                subtypes=subtype_filter,
+                effective_profiles=effective_profile_filter,
+            ):
                 continue
             key = (source, row["id"], _eval_lane(row))
             if key in seen_ids:

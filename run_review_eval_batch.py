@@ -595,6 +595,21 @@ def cmd_finalize(args) -> int:
                     "protected_cue_indices": list(row.get("protected_cue_indices", [])),
                     "offending_spans": list(row.get("offending_spans", [])),
                     "preferred_actions": list(row.get("preferred_actions", [])),
+                    "effective_strict_prompt_profile": (
+                        "fragment_preserving_v3"
+                        if (
+                            row["provenance"].get("prompt_profile") == "fragment_preserving_v2"
+                            and len(row.get("offending_cue_indices", [])) == 1
+                            and row.get("protected_cue_indices")
+                            and row.get("offending_spans")
+                            and all(
+                                span.get("preferred_action") == "restore_missing_tail"
+                                and span.get("source_tail_type") == "continuation_tail"
+                                for span in row.get("offending_spans", [])
+                            )
+                        )
+                        else row["provenance"].get("prompt_profile")
+                    ),
                     "base_phase1_emitted_cues": _serialize_emitted_cues(
                         _phase_result_from_dict(row["raw_phase1_result"])
                     ) if row.get("raw_phase1_result") else (_serialize_emitted_cues(phase1_result) if phase1_result else []),
@@ -827,6 +842,10 @@ def cmd_finalize(args) -> int:
                     "style_action_tail_accept_modes_by_channel": style_action_tail_accept_modes_by_channel,
                     "captured_phase1_risk_flags": list(row.get("phase1_result", {}).get("risk_flags", [])) if row.get("phase1_result") else [],
                     "average_cps": round(_average_cps(wrapped_final), 3),
+                    "effective_strict_prompt_profile": (
+                        style_retry_trace.get("effective_strict_prompt_profile")
+                        or style_retry_trace.get("prompt_profile")
+                    ),
                     "style_retry_trace": style_retry_trace,
                 },
                 "provenance": {**row["provenance"], **batch_provenance},

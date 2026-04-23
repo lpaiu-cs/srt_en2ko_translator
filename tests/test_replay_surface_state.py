@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from collect_continuation_signature_rows import _effective_strict_prompt_profile, _signature_row
 from collect_continuation_signature_rows import _matches as _watchlist_matches
 from run_review_eval import (
     _current_accept_mode,
@@ -153,6 +154,7 @@ class ReplaySurfaceStateTests(unittest.TestCase):
     def test_watchlist_match_with_stage_and_subtype_filters(self) -> None:
         row = {
             "id": "lecture::block-1",
+            "provenance": {"prompt_profile": "fragment_preserving_v2"},
             "current_block": {
                 "source_cues": [
                     {"cue_index": 1, "text": "setup"},
@@ -166,6 +168,12 @@ class ReplaySurfaceStateTests(unittest.TestCase):
                 "style_retry_trace": {
                     "offending_cue_indices": [2],
                     "protected_cue_indices": [1],
+                    "offending_spans": [
+                        {
+                            "preferred_action": "restore_missing_tail",
+                            "source_tail_type": "continuation_tail",
+                        }
+                    ],
                 },
             },
         }
@@ -182,6 +190,65 @@ class ReplaySurfaceStateTests(unittest.TestCase):
                 stages={"strict_retry_overedit"},
                 subtypes={"local_meaning_not_restored"},
             )
+        )
+        self.assertTrue(
+            _watchlist_matches(
+                row,
+                stages={"strict_retry_selector"},
+                subtypes={"local_meaning_not_restored"},
+                effective_profiles={"fragment_preserving_v3"},
+            )
+        )
+        self.assertFalse(
+            _watchlist_matches(
+                row,
+                stages={"strict_retry_selector"},
+                subtypes={"local_meaning_not_restored"},
+                effective_profiles={"fragment_preserving_v2"},
+            )
+        )
+
+    def test_watchlist_signature_row_keeps_effective_strict_prompt_profile(self) -> None:
+        row = {
+            "id": "lecture::block-2",
+            "lecture": "Lecture X",
+            "pipeline_signals": {
+                "style_retry_rejection_stage": "strict_retry_selector",
+                "style_retry_trace": {
+                    "effective_strict_prompt_profile": "fragment_preserving_v3",
+                },
+            },
+        }
+        signature = _signature_row(row, "dummy.jsonl")
+        self.assertEqual(signature["effective_strict_prompt_profile"], "fragment_preserving_v3")
+
+    def test_effective_strict_prompt_profile_backfills_continuation_v3(self) -> None:
+        row = {
+            "provenance": {"prompt_profile": "fragment_preserving_v2"},
+            "pipeline_signals": {
+                "style_retry_trace": {
+                    "offending_cue_indices": [2],
+                    "protected_cue_indices": [1],
+                    "offending_spans": [
+                        {
+                            "preferred_action": "restore_missing_tail",
+                            "source_tail_type": "continuation_tail",
+                        }
+                    ],
+                }
+            },
+        }
+        self.assertEqual(_effective_strict_prompt_profile(row), "fragment_preserving_v3")
+
+    def test_pipeline_signal_can_surface_effective_strict_prompt_profile(self) -> None:
+        signals = {
+            "style_retry_trace": {
+                "effective_strict_prompt_profile": "fragment_preserving_v3",
+            }
+        }
+        self.assertEqual(
+            signals["style_retry_trace"].get("effective_strict_prompt_profile"),
+            "fragment_preserving_v3",
         )
 
 

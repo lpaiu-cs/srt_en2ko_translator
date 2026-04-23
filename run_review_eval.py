@@ -446,6 +446,10 @@ def main() -> int:
                     "replay_current_actions": replay_surface["current_actions"],
                     "replay_historical_tail_type": replay_surface["historical_tail_type"],
                     "replay_historical_outcome": replay_surface["historical_outcome"],
+                    "effective_strict_prompt_profile": (
+                        metrics.style_retry_trace.get("effective_strict_prompt_profile")
+                        or metrics.style_retry_trace.get("prompt_profile")
+                    ),
                     "style_retry_trace": metrics.style_retry_trace,
                 },
                 "provenance": provenance,

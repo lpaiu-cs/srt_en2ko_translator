@@ -1245,6 +1245,9 @@ def _translate_block_recursive(
                 metrics.style_retry_trace["preferred_actions"] = list(preferred_actions)
                 metrics.style_retry_trace["forced_invocation_reason"] = not_invoked_reason
                 metrics.style_retry_trace["prompt_profile"] = strict_retry_prompt_profile or config.phase1_prompt_profile
+                metrics.style_retry_trace["effective_strict_prompt_profile"] = (
+                    strict_retry_prompt_profile or config.phase1_prompt_profile
+                )
             strict_phase1, strict_retry_failures = _run_phase1_style_retry(
                 block,
                 final_result,
