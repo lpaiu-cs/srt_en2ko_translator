@@ -258,3 +258,22 @@ Current family split is intentionally broad:
 - `wrap_readability`
 
 Use this corpus to inspect broad shipping bottlenecks such as low repair utility, fallback trigger quality, and post-wrap readability failures without reopening continuation-tail behavior.
+
+You can also split the shipping corpus into family-specific worksets:
+
+```bash
+python3 split_shipping_failure_corpus.py \
+  --input evaluation/cs231n_sp25_shipping_failure_corpus_round37.jsonl \
+  --family english_residual \
+  --output evaluation/cs231n_sp25_shipping_failure_corpus_round37_english_residual.jsonl
+
+python3 split_shipping_failure_corpus.py \
+  --input evaluation/cs231n_sp25_shipping_failure_corpus_round37.jsonl \
+  --family fallback_trigger \
+  --output evaluation/cs231n_sp25_shipping_failure_corpus_round37_fallback_trigger.jsonl
+
+python3 split_shipping_failure_corpus.py \
+  --input evaluation/cs231n_sp25_shipping_failure_corpus_round37.jsonl \
+  --family wrap_readability \
+  --output evaluation/cs231n_sp25_shipping_failure_corpus_round37_wrap_readability.jsonl
+```
