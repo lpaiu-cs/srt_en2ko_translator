@@ -275,6 +275,38 @@ def _style_retry_rejection_stage(signals: dict) -> str:
     return "strict_retry_selector"
 
 
+def _style_retry_rejection_subtype(signals: dict) -> str | None:
+    if _style_retry_rejection_stage(signals) != "strict_retry_selector":
+        return None
+    trace = signals.get("style_retry_trace", {})
+    causes = set(trace.get("rejection_causes", []))
+    if "protected_cue_touched" in causes:
+        return "protected_cue_touched"
+    if "restore_tail_empty" in causes:
+        return "empty_tail_collapse"
+    if (
+        "restore_tail_duplicate_persisted" in causes
+        or "restore_tail_warning_persisted" in causes
+        or "restore_tail_not_changed" in causes
+        or any(
+            cause.startswith("restore_tail_overclosed_")
+            or cause.endswith("_shape_missing")
+            or cause == "delete_repeat_not_changed"
+            for cause in causes
+        )
+    ):
+        return "local_meaning_not_restored"
+    return "selector_other"
+
+
+def _style_retry_not_invoked_reason(signals: dict) -> str | None:
+    if _current_accept_mode(signals) != "not_invoked":
+        return None
+    trace = signals.get("style_retry_trace", {})
+    reason = trace.get("not_invoked_reason")
+    return str(reason) if reason else None
+
+
 def _replay_transition(entry: dict, signals: dict) -> str | None:
     replay_meta = entry.get("replay_meta") or {}
     historical_outcome = replay_meta.get("style_retry_outcome")
@@ -424,6 +456,8 @@ def main() -> int:
                 },
             }
             record["pipeline_signals"]["style_retry_rejection_stage"] = _style_retry_rejection_stage(record["pipeline_signals"])
+            record["pipeline_signals"]["style_retry_rejection_subtype"] = _style_retry_rejection_subtype(record["pipeline_signals"])
+            record["pipeline_signals"]["style_retry_not_invoked_reason"] = _style_retry_not_invoked_reason(record["pipeline_signals"])
             record["pipeline_signals"]["replay_current_accept_mode"] = _current_accept_mode(record["pipeline_signals"])
             record["pipeline_signals"]["replay_transition"] = _replay_transition(entry, record["pipeline_signals"])
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

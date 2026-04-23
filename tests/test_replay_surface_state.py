@@ -7,7 +7,9 @@ from run_review_eval import (
     _current_surfaced_actions,
     _replay_surface_info,
     _replay_transition,
+    _style_retry_not_invoked_reason,
     _style_retry_rejection_stage,
+    _style_retry_rejection_subtype,
 )
 
 
@@ -112,6 +114,40 @@ class ReplaySurfaceStateTests(unittest.TestCase):
             _replay_transition(entry, signals),
             "accepted->unsurfaced->not_invoked",
         )
+
+    def test_not_invoked_reason(self) -> None:
+        signals = {
+            "style_retry_invoked": False,
+            "style_retry_accepted": False,
+            "style_retry_rejected": False,
+            "style_retry_trace": {"not_invoked_reason": "acceptable_absorption"},
+        }
+        self.assertEqual(_style_retry_not_invoked_reason(signals), "acceptable_absorption")
+
+    def test_rejection_subtypes(self) -> None:
+        empty_signals = {
+            "style_retry_invoked": True,
+            "style_retry_accepted": False,
+            "style_retry_rejected": True,
+            "style_retry_trace": {"rejection_causes": ["restore_tail_empty"]},
+        }
+        self.assertEqual(_style_retry_rejection_subtype(empty_signals), "empty_tail_collapse")
+
+        protected_signals = {
+            "style_retry_invoked": True,
+            "style_retry_accepted": False,
+            "style_retry_rejected": True,
+            "style_retry_trace": {"rejection_causes": ["protected_cue_touched"]},
+        }
+        self.assertEqual(_style_retry_rejection_subtype(protected_signals), "protected_cue_touched")
+
+        local_signals = {
+            "style_retry_invoked": True,
+            "style_retry_accepted": False,
+            "style_retry_rejected": True,
+            "style_retry_trace": {"rejection_causes": ["restore_tail_overclosed_for_continuation"]},
+        }
+        self.assertEqual(_style_retry_rejection_subtype(local_signals), "local_meaning_not_restored")
 
 
 if __name__ == "__main__":

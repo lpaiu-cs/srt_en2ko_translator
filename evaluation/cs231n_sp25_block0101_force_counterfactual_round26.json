@@ -1,0 +1,64 @@
+{
+  "id": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language::block-0101",
+  "source_file": "cs231n_sp25/eng/Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language.srt",
+  "replay_meta": {
+    "style_focus": "restore_missing_tail",
+    "source_tail_type": "continuation_tail",
+    "style_retry_outcome": "rejected"
+  },
+  "current_translated_cues": [
+    {
+      "cue_index": 191,
+      "start": "00:07:58,470",
+      "end": "00:08:02,070",
+      "text": "이 모델의 장점은 단지 연관성만으로도 학습할\n수 있다는 점입니다."
+    },
+    {
+      "cue_index": 192,
+      "start": "00:08:02,070",
+      "end": "00:08:03,650",
+      "text": "이미지와 텍스트의."
+    }
+  ],
+  "forced_request": {
+    "style_retry_reasons": [
+      "duplicate_restatement"
+    ],
+    "protected_cue_indices": [
+      191
+    ],
+    "offending_cue_indices": [
+      192
+    ],
+    "offending_spans": [
+      {
+        "cue_index": 192,
+        "cue_indices": [
+          191,
+          192
+        ],
+        "span_text": "이미지와 텍스트의",
+        "left_text": "이 모델의 장점은 단지 연관성만으로도 학습할 수 있다는 점입니다.",
+        "right_text": "이미지와 텍스트의.",
+        "source_cue_text": "of images and text.",
+        "source_tail_type": "continuation_tail",
+        "issue": "duplicate_restatement",
+        "preferred_action": "restore_missing_tail"
+      }
+    ],
+    "preferred_actions": [
+      "restore_missing_tail"
+    ]
+  },
+  "counterfactual_emitted_cues": [
+    {
+      "cue_index": 191,
+      "text": "이 모델의 장점은 단지 연관성만으로도 학습할 수 있다는 점입니다."
+    },
+    {
+      "cue_index": 192,
+      "text": "이미지와 텍스트의 연관성으로요."
+    }
+  ],
+  "risk_flags": []
+}

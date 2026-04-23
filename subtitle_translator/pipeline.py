@@ -60,6 +60,8 @@ _THAT_CLAUSE_MARKER_RE = re.compile(r"(라고|라는|다고|다는|하면|된다
 _RELATIVE_CLAUSE_MARKER_RE = re.compile(r"(하는|되는|했던|였던|인|할|될|보여주는|가지는)")
 _COMPARISON_MARKER_RE = re.compile(r"(처럼|같이|보다|만큼|에 비해|와 달리|대신)")
 _CONTINUATION_TAIL_RE = re.compile(r"(으로|에서|와|과|로|에|의|중|부터|까지|하며|하면서|한 채|및)$")
+_FRAGMENTARY_CONTINUATION_RE = re.compile(r"(의|와|과|로|으로|에|에서|부터|까지|만|및|처럼|보다|중|쪽의)$")
+_CONTINUATION_OVERLAP_SUFFIX_RE = re.compile(r"(입니다|입니다만|이죠|예요|에요|거죠|겁니다|합니다|합니다만|됩니다|되죠|돼요|요)$")
 _PURPOSE_TAIL_NORMALIZATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"기 위해서(?:입니다|인 거죠|인 겁니다|이죠|예요|에요|요)?(?:[.!?\"'”’),，、\s]*)$"), "기 위해"),
     (re.compile(r"기 위해(?:입니다|인 거죠|인 겁니다|이죠|예요|에요|요)?(?:[.!?\"'”’),，、\s]*)$"), "기 위해"),
@@ -281,6 +283,135 @@ def _style_retry_feedback(
             offending_spans.append(detail)
 
     return sorted(offending_cues), offending_spans, list(dict.fromkeys(preferred_actions))
+
+
+def _source_tail_type_from_text(source_text: str) -> str | None:
+    normalized = normalize_text(source_text).casefold()
+    if not normalized:
+        return None
+    if normalized.startswith("to "):
+        return "purpose_tail"
+    if normalized.startswith(("that ", "because ", "if ", "while ")):
+        return "that_clause_tail"
+    if normalized.startswith(("which ", "who ", "whom ", "whose ", "where ", "when ", "why ")):
+        return "relative_clause_tail"
+    if normalized.startswith(("as ", "than ", "rather than ", "compared to ", "like ")):
+        return "comparison_tail"
+    if normalized.startswith(("for ", "by ", "of ", "with ", "without ", "into ", "from ")):
+        return "continuation_tail"
+    return None
+
+
+def _looks_fragmentary_continuation(text: str) -> bool:
+    normalized = normalize_text(text).rstrip(".,!?;:'\"")
+    if not normalized:
+        return True
+    if _STRONG_CLOSURE_RE.search(normalized):
+        return False
+    if len(normalized) <= 18 and _FRAGMENTARY_CONTINUATION_RE.search(normalized):
+        return True
+    return False
+
+
+def _continuation_overlap_stem(text: str) -> str:
+    normalized = normalize_text(text).rstrip(".,!?;:'\"")
+    normalized = _CONTINUATION_OVERLAP_SUFFIX_RE.sub("", normalized).rstrip(" ,，")
+    return normalized
+
+
+def _continuation_detector_miss_feedback(
+    block: TranslationBlock,
+    result: PhaseTranslationResult,
+) -> tuple[List[int], List[dict], List[str]] | None:
+    if len(block.cues) < 2 or "carry_context_only" not in block.lint_actions:
+        return None
+
+    tail_source_type = _source_tail_type_from_text(block.cues[-1].text)
+    if tail_source_type != "continuation_tail":
+        return None
+
+    text_map = _result_text_map(result)
+    tail_cue = block.cues[-1]
+    prev_cue = block.cues[-2]
+    tail_text = text_map.get(tail_cue.index, "")
+    prev_text = text_map.get(prev_cue.index, "")
+    overlap_stem = _continuation_overlap_stem(tail_text)
+    if not (
+        _looks_fragmentary_continuation(tail_text)
+        or (tail_text and prev_text and _looks_like_duplicate_proposition(prev_text, tail_text))
+        or (overlap_stem and len(overlap_stem) >= 8 and overlap_stem in prev_text)
+    ):
+        return None
+
+    span_text = tail_text.rstrip(".,!?;:'\"")
+    span = {
+        "cue_index": tail_cue.index,
+        "cue_indices": [prev_cue.index, tail_cue.index],
+        "span_text": span_text,
+        "left_text": prev_text,
+        "right_text": tail_text,
+        "source_cue_text": tail_cue.text,
+        "source_tail_type": "continuation_tail",
+        "issue": "duplicate_restatement",
+        "preferred_action": "restore_missing_tail",
+        "trigger_reason": "detector_miss",
+    }
+    return [tail_cue.index], [span], ["restore_missing_tail"]
+
+
+def _classify_not_invoked_reason(
+    block: TranslationBlock,
+    result: PhaseTranslationResult,
+) -> str:
+    if not block.cues:
+        return "no_offending_cue_after_phase1"
+
+    text_map = _result_text_map(result)
+    tail_source_type = _source_tail_type_from_text(block.cues[-1].text)
+    if tail_source_type == "continuation_tail":
+        tail_text = text_map.get(block.cues[-1].index, "")
+        prev_text = text_map.get(block.cues[-2].index, "") if len(block.cues) >= 2 else ""
+        overlap_stem = _continuation_overlap_stem(tail_text)
+        if _looks_fragmentary_continuation(tail_text) or (
+            "carry_context_only" in block.lint_actions
+            and tail_text
+            and prev_text
+            and (
+                _looks_like_duplicate_proposition(prev_text, tail_text)
+                or (overlap_stem and len(overlap_stem) >= 8 and overlap_stem in prev_text)
+            )
+        ):
+            return "detector_miss" if "carry_context_only" in block.lint_actions else "low_tail_confidence"
+        if tail_text:
+            return "acceptable_absorption"
+        return "already_absorbed_by_cue1"
+    if text_map.get(block.cues[-1].index, ""):
+        return "acceptable_absorption"
+    return "no_offending_cue_after_phase1"
+
+
+def _effective_style_retry_feedback(
+    block: TranslationBlock,
+    result: PhaseTranslationResult,
+    pre_gate,
+    post_gate,
+) -> tuple[List[str], List[int], List[dict], List[str], str | None]:
+    style_retry_reasons = _style_retry_candidate_reasons(result, pre_gate, post_gate)
+    if style_retry_reasons:
+        offending_cue_indices, offending_spans, preferred_actions = _style_retry_feedback(
+            block,
+            pre_gate,
+            post_gate,
+            style_retry_reasons,
+        )
+        return style_retry_reasons, offending_cue_indices, offending_spans, preferred_actions, None
+
+    forced_feedback = _continuation_detector_miss_feedback(block, result)
+    if forced_feedback is not None:
+        offending_cue_indices, offending_spans, preferred_actions = forced_feedback
+        return ["duplicate_restatement"], offending_cue_indices, offending_spans, preferred_actions, "detector_miss"
+
+    return [], [], [], [], _classify_not_invoked_reason(block, result)
 
 
 def _style_warning_spans(pre_gate, post_gate, reasons: Sequence[str]) -> List[dict]:
@@ -681,12 +812,30 @@ def _run_phase1_style_retry(
     glossary_terms: list,
     metrics: Optional[TranslationMetrics],
 ) -> tuple[Optional[PhaseTranslationResult], List[str]]:
+    offending_cue_index_set = {
+        int(span["cue_index"])
+        for span in offending_spans
+        if isinstance(span.get("cue_index"), int)
+    }
+    strict_retry_mode = "full_block"
+    if (
+        len(offending_cue_index_set) == 1
+        and protected_cue_indices
+        and any(span.get("trigger_reason") == "detector_miss" for span in offending_spans)
+        and all(
+            span.get("preferred_action") == "restore_missing_tail"
+            and span.get("source_tail_type") == "continuation_tail"
+            for span in offending_spans
+        )
+    ):
+        strict_retry_mode = "offending_cue_only"
     if metrics:
         metrics.style_retry_invocations += 1
     request = TranslationRequest(
         block=block,
         glossary_terms=glossary_terms,
         strict_style_retry=True,
+        strict_retry_mode=strict_retry_mode,
         style_retry_reasons=style_retry_reasons,
         previous_emitted_cues=phase1_result.emitted_cues,
         protected_cue_indices=protected_cue_indices,
@@ -802,6 +951,12 @@ def _choose_better_style_candidate(
     offending_spans: Sequence[dict] | None = None,
 ):
     rejection_causes: List[str] = []
+    forced_detector_retry = any(span.get("trigger_reason") == "detector_miss" for span in (offending_spans or []))
+    offending_cue_indices = {
+        int(span["cue_index"])
+        for span in (offending_spans or [])
+        if isinstance(span.get("cue_index"), int)
+    }
     if protected_cue_indices:
         changed_protected = set(_changed_cue_indices(current_result, candidate_result)) & set(protected_cue_indices)
         if changed_protected:
@@ -832,6 +987,16 @@ def _choose_better_style_candidate(
     candidate_targeted = _gate_warning_occurrences(candidate_pre, candidate_post, style_retry_reasons)
     current_risk_targeted = _style_risk_occurrences(current_result, style_retry_reasons)
     candidate_risk_targeted = _style_risk_occurrences(candidate_result, style_retry_reasons)
+    changed_offending = bool(set(_changed_cue_indices(current_result, candidate_result)) & offending_cue_indices)
+    if (
+        forced_detector_retry
+        and changed_offending
+        and current_targeted == 0
+        and candidate_targeted == 0
+        and candidate_risk_targeted <= current_risk_targeted
+        and _gate_score(candidate_pre, candidate_post) <= _gate_score(current_pre, current_post)
+    ):
+        return candidate_result, candidate_pre, candidate_post, True, []
     if candidate_targeted < current_targeted:
         return candidate_result, candidate_pre, candidate_post, True, []
     if candidate_targeted == current_targeted and candidate_risk_targeted < current_risk_targeted:
@@ -950,14 +1115,19 @@ def _translate_block_recursive(
     final_post = post_gate
     strict_phase1: Optional[PhaseTranslationResult] = None
 
-    style_retry_reasons = _style_retry_candidate_reasons(final_result, final_pre, final_post)
+    (
+        style_retry_reasons,
+        initial_offending_cue_indices,
+        initial_offending_spans,
+        initial_preferred_actions,
+        initial_not_invoked_reason,
+    ) = _effective_style_retry_feedback(
+        block,
+        final_result,
+        final_pre,
+        final_post,
+    )
     if style_retry_reasons:
-        initial_offending_cue_indices, initial_offending_spans, initial_preferred_actions = _style_retry_feedback(
-            block,
-            final_pre,
-            final_post,
-            style_retry_reasons,
-        )
         if metrics:
             metrics.style_retry_trace = {
                 "reasons": list(style_retry_reasons),
@@ -965,6 +1135,7 @@ def _translate_block_recursive(
                 "protected_cue_indices": list(_protected_cue_indices_for_spans(block, initial_offending_spans)),
                 "offending_spans": list(initial_offending_spans),
                 "preferred_actions": list(initial_preferred_actions),
+                "forced_invocation_reason": initial_not_invoked_reason,
                 "base_phase1_emitted_cues": _serialize_emitted_cues(phase1_result),
             }
         deterministic_spans = _style_spans_for_actions(
@@ -1017,14 +1188,19 @@ def _translate_block_recursive(
                 metrics.style_retry_trace["micro_edit_accepted"] = False
                 metrics.style_retry_trace["micro_edit_rejection_causes"] = ["deterministic_noop"]
 
-        style_retry_reasons = _style_retry_candidate_reasons(final_result, final_pre, final_post)
+        (
+            style_retry_reasons,
+            offending_cue_indices,
+            offending_spans,
+            preferred_actions,
+            not_invoked_reason,
+        ) = _effective_style_retry_feedback(
+            block,
+            final_result,
+            final_pre,
+            final_post,
+        )
         if style_retry_reasons:
-            offending_cue_indices, offending_spans, preferred_actions = _style_retry_feedback(
-                block,
-                final_pre,
-                final_post,
-                style_retry_reasons,
-            )
             protected_cue_indices = _protected_cue_indices_for_spans(block, offending_spans)
             if metrics:
                 metrics.note_style_action_attempts(offending_spans, channel="strict_retry")
@@ -1033,6 +1209,7 @@ def _translate_block_recursive(
                 metrics.style_retry_trace["protected_cue_indices"] = list(protected_cue_indices)
                 metrics.style_retry_trace["offending_spans"] = list(offending_spans)
                 metrics.style_retry_trace["preferred_actions"] = list(preferred_actions)
+                metrics.style_retry_trace["forced_invocation_reason"] = not_invoked_reason
             strict_phase1, strict_retry_failures = _run_phase1_style_retry(
                 block,
                 final_result,
@@ -1045,6 +1222,21 @@ def _translate_block_recursive(
                 glossary_terms,
                 metrics,
             )
+            if metrics and metrics.style_retry_trace is not None:
+                metrics.style_retry_trace["strict_retry_mode"] = (
+                    "offending_cue_only"
+                    if (
+                        len({int(span["cue_index"]) for span in offending_spans if isinstance(span.get("cue_index"), int)}) == 1
+                        and protected_cue_indices
+                        and any(span.get("trigger_reason") == "detector_miss" for span in offending_spans)
+                        and all(
+                            span.get("preferred_action") == "restore_missing_tail"
+                            and span.get("source_tail_type") == "continuation_tail"
+                            for span in offending_spans
+                        )
+                    )
+                    else "full_block"
+                )
             if strict_phase1 is not None:
                 raw_strict_phase1 = strict_phase1
                 strict_phase1, strict_post_normalizations = _apply_purpose_tail_post_normalization(
@@ -1119,6 +1311,7 @@ def _translate_block_recursive(
                 metrics.style_retry_trace["rejection_causes"] = list(strict_retry_failures)
                 metrics.add_style_retry_rejection_causes(strict_retry_failures)
         elif metrics:
+            metrics.style_retry_trace["not_invoked_reason"] = not_invoked_reason
             metrics.style_retry_trace["strict_candidate_raw_emitted_cues"] = []
             metrics.style_retry_trace["strict_candidate_emitted_cues"] = []
             metrics.style_retry_trace["strict_candidate_risk_flags"] = []
@@ -1126,6 +1319,10 @@ def _translate_block_recursive(
             metrics.style_retry_trace["accept_mode"] = None
             metrics.style_retry_trace["accepted"] = False
             metrics.style_retry_trace["rejection_causes"] = ["resolved_by_micro_edit"]
+    elif metrics:
+        metrics.style_retry_trace = {
+            "not_invoked_reason": initial_not_invoked_reason,
+        }
 
     if metrics:
         metrics.add_phase1_risk_flags(final_result.risk_flags)

@@ -3,15 +3,18 @@ from __future__ import annotations
 import unittest
 
 from subtitle_translator.config import load_runtime_config
-from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, TranslationBlock
+from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, TranslationBlock, TranslationRequest
 from subtitle_translator.pipeline import (
     _apply_deterministic_style_micro_edits,
     _apply_purpose_tail_post_normalization,
+    _classify_not_invoked_reason,
     _choose_better_style_candidate,
+    _continuation_detector_miss_feedback,
     _protected_cue_indices_for_spans,
     _wrap_phase_result,
 )
 from subtitle_translator.quality import post_wrap_gate, pre_wrap_gate
+from subtitle_translator.translators import _splice_offending_cue_rewrites
 
 
 class StyleActionTests(unittest.TestCase):
@@ -270,6 +273,180 @@ class StyleActionTests(unittest.TestCase):
 
         self.assertFalse(accepted)
         self.assertIn("restore_tail_purpose_marker_missing", rejection_causes)
+
+    def test_continuation_detector_miss_feedback_surfaces_fragmentary_tail(self) -> None:
+        block = TranslationBlock(
+            cues=[
+                Cue(
+                    index=191,
+                    start="00:07:58,470",
+                    end="00:08:02,070",
+                    text="like model is that it can be trained with just associations",
+                ),
+                Cue(
+                    index=192,
+                    start="00:08:02,070",
+                    end="00:08:03,650",
+                    text="of images and text.",
+                ),
+            ],
+            lint_reasons=["dependent_start", "comparison_midstart"],
+            lint_actions=["carry_context_only"],
+        )
+        result = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=191, text="이 모델의 장점은 단지 연관성만으로도 학습할 수 있다는 점입니다."),
+                EmittedCue(cue_index=192, text="이미지와 텍스트의."),
+            ],
+            risk_flags=[],
+        )
+        feedback = _continuation_detector_miss_feedback(block, result)
+        self.assertIsNotNone(feedback)
+        offending_cues, offending_spans, preferred_actions = feedback
+        self.assertEqual(offending_cues, [192])
+        self.assertEqual(preferred_actions, ["restore_missing_tail"])
+        self.assertEqual(offending_spans[0]["trigger_reason"], "detector_miss")
+
+    def test_not_invoked_reason_marks_acceptable_absorption(self) -> None:
+        block = TranslationBlock(
+            cues=[
+                Cue(
+                    index=147,
+                    start="00:06:08,700",
+                    end="00:06:13,180",
+                    text="was that you want to pull together again,",
+                ),
+                Cue(
+                    index=148,
+                    start="00:06:13,180",
+                    end="00:06:14,240",
+                    text="transformations of the same image.",
+                ),
+            ],
+            lint_reasons=["dependent_start"],
+            lint_actions=[],
+        )
+        result = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=147, text="다시 한 번 모으고 싶은 것은, 변환된"),
+                EmittedCue(cue_index=148, text="같은 이미지의 것들입니다."),
+            ],
+            risk_flags=[],
+        )
+        self.assertEqual(_classify_not_invoked_reason(block, result), "acceptable_absorption")
+
+    def test_not_invoked_reason_marks_continuation_duplicate_as_detector_miss(self) -> None:
+        block = TranslationBlock(
+            cues=[
+                Cue(
+                    index=191,
+                    start="00:07:58,470",
+                    end="00:08:02,070",
+                    text="like model is that it can be trained with just associations",
+                ),
+                Cue(
+                    index=192,
+                    start="00:08:02,070",
+                    end="00:08:03,650",
+                    text="of images and text.",
+                ),
+            ],
+            lint_reasons=["dependent_start", "comparison_midstart"],
+            lint_actions=["carry_context_only"],
+        )
+        result = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=191, text="모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,"),
+                EmittedCue(cue_index=192, text="이미지와 텍스트의 연관성입니다."),
+            ],
+            risk_flags=[],
+        )
+        self.assertEqual(_classify_not_invoked_reason(block, result), "detector_miss")
+        self.assertIsNotNone(_continuation_detector_miss_feedback(block, result))
+
+    def test_forced_detector_miss_candidate_can_be_accepted_without_warning_reduction(self) -> None:
+        block = TranslationBlock(
+            cues=[
+                Cue(index=191, start="00:07:58,470", end="00:08:02,070", text="like model is that it can be trained with just associations"),
+                Cue(index=192, start="00:08:02,070", end="00:08:03,650", text="of images and text."),
+            ],
+            lint_reasons=["dependent_start", "comparison_midstart"],
+            lint_actions=["carry_context_only"],
+        )
+        current = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=191, text="모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,"),
+                EmittedCue(cue_index=192, text="이미지와 텍스트의 연관성입니다."),
+            ],
+            risk_flags=[],
+        )
+        candidate = PhaseTranslationResult(
+            emitted_cues=[
+                EmittedCue(cue_index=191, text="모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,"),
+                EmittedCue(cue_index=192, text="이미지와 텍스트의 연관성으로요."),
+            ],
+            risk_flags=[],
+        )
+        offending_spans = [
+            {
+                "cue_index": 192,
+                "cue_indices": [191, 192],
+                "span_text": "이미지와 텍스트의 연관성입니다",
+                "left_text": "모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,",
+                "right_text": "이미지와 텍스트의 연관성입니다.",
+                "source_cue_text": "of images and text.",
+                "source_tail_type": "continuation_tail",
+                "issue": "duplicate_restatement",
+                "preferred_action": "restore_missing_tail",
+                "trigger_reason": "detector_miss",
+            }
+        ]
+        current_pre = pre_wrap_gate(block, current.emitted_cues, [], self.config)
+        current_post = post_wrap_gate(_wrap_phase_result(block, current, self.config, None), self.config)
+        candidate_pre = pre_wrap_gate(block, candidate.emitted_cues, [], self.config)
+        candidate_post = post_wrap_gate(_wrap_phase_result(block, candidate, self.config, None), self.config)
+
+        _, _, _, accepted, rejection_causes = _choose_better_style_candidate(
+            current,
+            current_pre,
+            current_post,
+            candidate,
+            candidate_pre,
+            candidate_post,
+            ["duplicate_restatement"],
+            _protected_cue_indices_for_spans(block, offending_spans),
+            offending_spans=offending_spans,
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(rejection_causes, [])
+
+    def test_splice_offending_cue_rewrites_preserves_protected_cues(self) -> None:
+        request = TranslationRequest(
+            block=TranslationBlock(
+                cues=[
+                    Cue(index=191, start="00:00:00,000", end="00:00:01,000", text="one nice thing about the model is"),
+                    Cue(index=192, start="00:00:01,000", end="00:00:02,000", text="of images and text."),
+                ]
+            ),
+            strict_style_retry=True,
+            strict_retry_mode="offending_cue_only",
+            previous_emitted_cues=[
+                EmittedCue(cue_index=191, text="모델의 장점 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."),
+                EmittedCue(cue_index=192, text="이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."),
+            ],
+            protected_cue_indices=[191],
+            offending_cue_indices=[192],
+        )
+
+        result = _splice_offending_cue_rewrites(
+            request,
+            rewrites=[{"cue_index": 192, "text": "이미지와 텍스트의 연관성으로요."}],
+            risk_flags=["duplicate_restatement_risk"],
+        )
+
+        self.assertEqual(result.emitted_cues[0].text, "모델의 장점 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다.")
+        self.assertEqual(result.emitted_cues[1].text, "이미지와 텍스트의 연관성으로요.")
 
     def test_restore_missing_tail_rejects_overclosed_relative_clause(self) -> None:
         block = TranslationBlock(

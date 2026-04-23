@@ -73,6 +73,68 @@ def _build_phase_schema(cue_count: int, schema_name: str) -> dict:
     }
 
 
+def _build_offending_retry_schema(cue_count: int, schema_name: str) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "offending_cue_rewrites": {
+                        "type": "array",
+                        "minItems": cue_count,
+                        "maxItems": cue_count,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "cue_index": {"type": "integer"},
+                                "text": {"type": "string"},
+                            },
+                            "required": ["cue_index", "text"],
+                        },
+                    },
+                    "risk_flags": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": RISK_FLAG_ENUM},
+                    },
+                },
+                "required": ["offending_cue_rewrites", "risk_flags"],
+            },
+        },
+    }
+
+
+def _splice_offending_cue_rewrites(
+    request: TranslationRequest,
+    rewrites: List[dict],
+    risk_flags: List[str],
+) -> PhaseTranslationResult:
+    rewrite_map = {
+        int(item["cue_index"]): normalize_text(str(item["text"]))
+        for item in rewrites
+    }
+    previous_map = {
+        cue.cue_index: normalize_text(cue.text)
+        for cue in request.previous_emitted_cues
+    }
+    emitted_cues: List[EmittedCue] = []
+    for cue in request.block.cues:
+        if cue.index in rewrite_map:
+            emitted_cues.append(EmittedCue(cue_index=cue.index, text=rewrite_map[cue.index]))
+            continue
+        if cue.index not in previous_map:
+            raise ValueError(f"Missing protected cue {cue.index} in previous_emitted_cues for offending-only retry")
+        emitted_cues.append(EmittedCue(cue_index=cue.index, text=previous_map[cue.index]))
+    return PhaseTranslationResult(
+        emitted_cues=emitted_cues,
+        risk_flags=list(dict.fromkeys(risk_flags)),
+    )
+
+
 def _phase1_examples_v1() -> List[tuple[dict, dict]]:
     return [
         (
@@ -478,7 +540,79 @@ def _phase1_examples_v2() -> List[tuple[dict, dict]]:
     ]
 
 
-def _phase1_example_messages(prompt_profile: str, strict_style_retry: bool = False) -> List[dict]:
+def _phase1_example_messages(
+    prompt_profile: str,
+    strict_style_retry: bool = False,
+    strict_retry_mode: str = "full_block",
+) -> List[dict]:
+    if strict_style_retry and strict_retry_mode == "offending_cue_only" and prompt_profile == "fragment_preserving_v2":
+        offending_only_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": ["dependent_start", "comparison_midstart"],
+                "lint_actions": ["carry_context_only"],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_contract": "offending_cue_only",
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다. 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다.",
+                "note": "Rewrite only cue 192. Keep cue 191 verbatim and return only the offending cue rewrite.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 191,
+                    "start": "00:07:58,470",
+                    "end": "00:08:02,070",
+                    "text": "like model is that it can be trained with just associations",
+                    "duration_ms": 3600,
+                    "gap_after_ms": 0,
+                },
+                {
+                    "cue_index": 192,
+                    "start": "00:08:02,070",
+                    "end": "00:08:03,650",
+                    "text": "of images and text.",
+                    "duration_ms": 1580,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 191, "text": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."},
+                {"cue_index": 192, "text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."},
+            ],
+            "offending_cue_indices": [192],
+            "protected_cue_indices": [191],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 192,
+                    "cue_indices": [191, 192],
+                    "span_text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다",
+                    "left_text": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다",
+                    "right_text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다",
+                    "source_cue_text": "of images and text.",
+                    "source_tail_type": "continuation_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                    "trigger_reason": "detector_miss",
+                }
+            ],
+        }
+        offending_only_assistant = {
+            "offending_cue_rewrites": [
+                {"cue_index": 192, "text": "이미지와 텍스트의 연관성으로요."}
+            ],
+            "risk_flags": [],
+        }
+        return [
+            {"role": "user", "content": json.dumps(offending_only_user, ensure_ascii=False)},
+            {"role": "assistant", "content": json.dumps(offending_only_assistant, ensure_ascii=False)},
+        ]
+
     if prompt_profile == "fragment_preserving_v1":
         examples = _phase1_examples_v1()
     elif prompt_profile == "fragment_preserving_v2":
@@ -693,6 +827,322 @@ def _phase1_example_messages(prompt_profile: str, strict_style_retry: bool = Fal
         }
         messages.append({"role": "user", "content": json.dumps(strict_relative_user, ensure_ascii=False)})
         messages.append({"role": "assistant", "content": json.dumps(strict_relative_assistant, ensure_ascii=False)})
+        strict_continuation_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": [],
+                "lint_actions": [],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "이상적으로는 CLIP 모델을 바로 바로 사용할 수 있기를 원합니다.",
+                "note": "When the first cue already carries the setup, restore only the leftover continuation tail instead of restating the whole proposition as a full sentence. Do not repeat the same adverbial anchor from cue 1 at the start of cue 2.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 1240,
+                    "start": "00:01:20,000",
+                    "end": "00:01:21,800",
+                    "text": "We would ideally want to be",
+                    "duration_ms": 1800,
+                    "gap_after_ms": 40,
+                },
+                {
+                    "cue_index": 1241,
+                    "start": "00:01:21,840",
+                    "end": "00:01:23,300",
+                    "text": "able to use a CLIP model out of the box.",
+                    "duration_ms": 1460,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 1240, "text": "이상적으로는 CLIP 모델을 바로"},
+                {"cue_index": 1241, "text": "바로 사용할 수 있기를 원합니다."},
+            ],
+            "offending_cue_indices": [1241],
+            "protected_cue_indices": [1240],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 1241,
+                    "cue_indices": [1240, 1241],
+                    "span_text": "바로 사용할 수 있기를 원합니다.",
+                    "left_text": "이상적으로는 CLIP 모델을 바로",
+                    "right_text": "바로 사용할 수 있기를 원합니다.",
+                    "source_cue_text": "able to use a CLIP model out of the box.",
+                    "source_tail_type": "continuation_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                }
+            ],
+        }
+        strict_continuation_assistant = {
+            "emitted_cues": [
+                {"cue_index": 1240, "text": "이상적으로는 CLIP 모델을 바로"},
+                {"cue_index": 1241, "text": "즉시 사용할 수 있으면 좋겠죠."},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_continuation_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_continuation_assistant, ensure_ascii=False)})
+        strict_continuation_short_tail_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": [],
+                "lint_actions": [],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고, 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다.",
+                "note": "If the protected cue already contains the main predicate, keep only the missing continuation tail in the offending cue.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 1290,
+                    "start": "00:01:24,000",
+                    "end": "00:01:25,900",
+                    "text": "one nice thing about the model is that it can be trained with just associations",
+                    "duration_ms": 1900,
+                    "gap_after_ms": 40,
+                },
+                {
+                    "cue_index": 1291,
+                    "start": "00:01:25,940",
+                    "end": "00:01:27,300",
+                    "text": "of images and text.",
+                    "duration_ms": 1360,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 1290, "text": "모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,"},
+                {"cue_index": 1291, "text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."},
+            ],
+            "offending_cue_indices": [1291],
+            "protected_cue_indices": [1290],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 1291,
+                    "cue_indices": [1290, 1291],
+                    "span_text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다.",
+                    "left_text": "모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,",
+                    "right_text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다.",
+                    "source_cue_text": "of images and text.",
+                    "source_tail_type": "continuation_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                }
+            ],
+        }
+        strict_continuation_short_tail_assistant = {
+            "emitted_cues": [
+                {"cue_index": 1290, "text": "모델의 장점은 이미지와 텍스트의 연관성만으로도 학습할 수 있다는 점이고,"},
+                {"cue_index": 1291, "text": "이미지와 텍스트의 연관성만으로요."},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_continuation_short_tail_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_continuation_short_tail_assistant, ensure_ascii=False)})
+        strict_continuation_detector_miss_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": ["dependent_start", "comparison_midstart"],
+                "lint_actions": ["carry_context_only"],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점이고, 이미지와 텍스트의 연관성만으로요.",
+                "note": "When a detector-miss invocation surfaces a continuation tail, keep the protected cue verbatim and rewrite only cue 2 into the missing tail fragment.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 191,
+                    "start": "00:07:58,470",
+                    "end": "00:08:02,070",
+                    "text": "like model is that it can be trained with just associations",
+                    "duration_ms": 3600,
+                    "gap_after_ms": 0,
+                },
+                {
+                    "cue_index": 192,
+                    "start": "00:08:02,070",
+                    "end": "00:08:03,650",
+                    "text": "of images and text.",
+                    "duration_ms": 1580,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 191, "text": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."},
+                {"cue_index": 192, "text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."},
+            ],
+            "offending_cue_indices": [192],
+            "protected_cue_indices": [191],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 192,
+                    "cue_indices": [191, 192],
+                    "span_text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다",
+                    "left_text": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다",
+                    "right_text": "이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다",
+                    "source_cue_text": "of images and text.",
+                    "source_tail_type": "continuation_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                    "trigger_reason": "detector_miss",
+                }
+            ],
+        }
+        strict_continuation_detector_miss_assistant = {
+            "emitted_cues": [
+                {"cue_index": 191, "text": "모델이 할 수 있는 것 중 하나는 이미지와 텍스트의 연관성만으로 학습할 수 있다는 점입니다."},
+                {"cue_index": 192, "text": "이미지와 텍스트의 연관성으로요."},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_continuation_detector_miss_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_continuation_detector_miss_assistant, ensure_ascii=False)})
+        strict_continuation_overedit_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": ["dependent_end"],
+                "lint_actions": ["carry_context_only"],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "이게 어떻게 작동하는지 보려면, 신경망을 다르게 생각하는 게 도움이 됩니다, 즉, 신경망을",
+                "note": "Do not add a discourse-marker head or collapse the continuation into a too-short fragment. Keep the remaining tail itself.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 1366,
+                    "start": "00:01:30,000",
+                    "end": "00:01:31,900",
+                    "text": "So to see how this works, it's useful to think",
+                    "duration_ms": 1900,
+                    "gap_after_ms": 40,
+                },
+                {
+                    "cue_index": 1367,
+                    "start": "00:01:31,940",
+                    "end": "00:01:33,300",
+                    "text": "of your neural network in a different way,",
+                    "duration_ms": 1360,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 1366, "text": "이게 어떻게 작동하는지 보려면, 신경망을 다르게 생각하는 게 도움이 됩니다,"},
+                {"cue_index": 1367, "text": "신경망을 다르게 생각하는 게 도움이 됩니다,"},
+            ],
+            "offending_cue_indices": [1367],
+            "protected_cue_indices": [1366],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 1367,
+                    "cue_indices": [1366, 1367],
+                    "span_text": "신경망을 다르게 생각하는 게 도움이 됩니다,",
+                    "left_text": "신경망을 다르게 생각하는 게 도움이 됩니다,",
+                    "right_text": "신경망을 다르게 생각하는 게 도움이 됩니다,",
+                    "source_cue_text": "of your neural network in a different way,",
+                    "source_tail_type": "continuation_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                }
+            ],
+        }
+        strict_continuation_overedit_assistant = {
+            "emitted_cues": [
+                {"cue_index": 1366, "text": "이게 어떻게 작동하는지 보려면, 신경망을 다르게 생각하는 게 도움이 됩니다,"},
+                {"cue_index": 1367, "text": "여러분의 신경망을 다른 방식으로,"},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_continuation_overedit_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_continuation_overedit_assistant, ensure_ascii=False)})
+        strict_continuation_empty_tail_user = {
+            "task": "subtitle_phase1_translate",
+            "boundary_lint": {
+                "lint_flags": [],
+                "lint_actions": [],
+            },
+            "style_retry": {
+                "strict_retry": True,
+                "retry_reasons": ["duplicate_restatement"],
+                "bad_output_to_avoid": "시각 장면의 풍부함 덕분에 아주 밀도 높은 장면 그래프를 만들 수 있습니다. 시각 장면의 풍부함 덕분에",
+                "note": "Do not delete the continuation tail when the source still contains a recoverable noun phrase. Keep a short non-empty continuation fragment.",
+            },
+            "source_cues": [
+                {
+                    "cue_index": 1410,
+                    "start": "00:01:34,000",
+                    "end": "00:01:35,900",
+                    "text": "because of the richness",
+                    "duration_ms": 1900,
+                    "gap_after_ms": 40,
+                },
+                {
+                    "cue_index": 1411,
+                    "start": "00:01:35,940",
+                    "end": "00:01:37,100",
+                    "text": "of the visual scene.",
+                    "duration_ms": 1160,
+                    "gap_after_ms": 0,
+                },
+            ],
+            "left_context": [],
+            "right_context": [],
+            "glossary_terms": [],
+            "previous_emitted_cues": [
+                {"cue_index": 1410, "text": "시각 장면의 풍부함 덕분에 아주 밀도 높은 장면 그래프를 만들 수 있습니다."},
+                {"cue_index": 1411, "text": "시각 장면의 풍부함 덕분에"},
+            ],
+            "offending_cue_indices": [1411],
+            "protected_cue_indices": [1410],
+            "preferred_actions": ["restore_missing_tail"],
+            "offending_spans": [
+                {
+                    "cue_index": 1411,
+                    "cue_indices": [1410, 1411],
+                    "span_text": "시각 장면의 풍부함 덕분에",
+                    "left_text": "시각 장면의 풍부함 덕분에 아주 밀도 높은 장면 그래프를 만들 수 있습니다.",
+                    "right_text": "시각 장면의 풍부함 덕분에",
+                    "source_cue_text": "of the visual scene.",
+                    "source_tail_type": "continuation_tail",
+                    "issue": "duplicate_restatement",
+                    "preferred_action": "restore_missing_tail",
+                }
+            ],
+        }
+        strict_continuation_empty_tail_assistant = {
+            "emitted_cues": [
+                {"cue_index": 1410, "text": "시각 장면의 풍부함 덕분에 아주 밀도 높은 장면 그래프를 만들 수 있습니다."},
+                {"cue_index": 1411, "text": "시각 장면 자체의."},
+            ],
+            "risk_flags": [],
+        }
+        messages.append({"role": "user", "content": json.dumps(strict_continuation_empty_tail_user, ensure_ascii=False)})
+        messages.append({"role": "assistant", "content": json.dumps(strict_continuation_empty_tail_assistant, ensure_ascii=False)})
     return messages
 
 
@@ -700,6 +1150,7 @@ def build_phase1_system_prompt(
     config: RuntimeConfig,
     strict_style_retry: bool = False,
     style_retry_reasons: List[str] | None = None,
+    strict_retry_mode: str = "full_block",
 ) -> str:
     parts = [
         "You are a precise subtitle translator.",
@@ -739,14 +1190,30 @@ def build_phase1_system_prompt(
                 "If preferred_actions include delete_repeat_local, remove the repeated local proposition instead of paraphrasing it again.",
                 "If preferred_actions include restore_missing_tail, rewrite the offending cue so it restores that cue's missing local source meaning instead of repeating the previous cue.",
                 "When offending_spans include source_tail_type, preserve that tail shape instead of normalizing it into a generic sentence.",
+                "When offending_spans include trigger_reason=detector_miss, keep the protected cue verbatim whenever possible and fix only the offending cue.",
                 "For purpose_tail, restore a purpose fragment such as '...하기 위해', '...하려고', or '...하도록' and avoid a copular ending like '...입니다'.",
                 "For that_clause_tail, keep a subordinate-clause shape such as '...라고', '...라는', '...다고', '...하면', or '...때문에' rather than a standalone closed sentence.",
                 "For relative_clause_tail, keep a modifier shape such as '...하는', '...되는', '...인', or '...할' rather than a standalone sentence.",
                 "For comparison_tail, keep a comparison shape such as '...처럼', '...같이', '...보다', '...만큼', or '...에 비해' instead of closing the thought.",
                 "For continuation_tail, prefer a connective continuation over a full sentence ending when the source tail is only a connective phrase.",
+                "For continuation_tail, if the protected cue already carries the main proposition, keep only the leftover local tail in the offending cue instead of restating the whole proposition.",
+                "For continuation_tail, if the protected cue already ends with an adverbial anchor such as '바로', do not repeat the same anchor at the start of the offending cue.",
+                "For continuation_tail, avoid generic closed endings such as '...원합니다', '...입니다', or '...말입니다' when a shorter connective tail would preserve the source shape better.",
+                "For continuation_tail, never start the offending cue with unsupported discourse-marker heads like '즉,' or '다시 말해,'.",
+                "For continuation_tail, do not collapse the offending cue to an empty string or a bare one-word fragment when the source tail still contains recoverable local meaning.",
+                "For continuation_tail, preserve at least one concrete lexical noun or modifier from the source tail in the offending cue instead of deleting it entirely.",
+                "For continuation_tail short tails such as 'of X', 'with X', or 'from X', prefer a short noun-phrase continuation like 'X의', 'X 쪽의', or 'X 자체의' over an empty cue.",
                 "Keep unaffected cues as close as possible to the previous anchor-preserving wording.",
             ]
         )
+        if strict_retry_mode == "offending_cue_only":
+            parts.extend(
+                [
+                    "When style_retry.retry_contract is offending_cue_only, return only offending_cue_rewrites.",
+                    "Do not return rewritten protected cues.",
+                    "Rewrite only the listed offending cue indices and leave every protected cue implicit and unchanged.",
+                ]
+            )
     if config.translation_context:
         parts.append(f"Context: {compact_spaces(config.translation_context)}")
     if config.translation_style:
@@ -805,7 +1272,16 @@ class OpenAIChatTranslator(BaseTranslator):
         self.phase1_system_prompt = build_phase1_system_prompt(config)
         self.repair_system_prompt = build_repair_system_prompt(config)
         self.phase1_example_messages = _phase1_example_messages(config.phase1_prompt_profile)
-        self.phase1_strict_example_messages = _phase1_example_messages(config.phase1_prompt_profile, strict_style_retry=True)
+        self.phase1_strict_example_messages = _phase1_example_messages(
+            config.phase1_prompt_profile,
+            strict_style_retry=True,
+            strict_retry_mode="full_block",
+        )
+        self.phase1_strict_offending_only_example_messages = _phase1_example_messages(
+            config.phase1_prompt_profile,
+            strict_style_retry=True,
+            strict_retry_mode="offending_cue_only",
+        )
         self.session = requests.Session()
 
     def _payload_for_phase1(self, request: TranslationRequest) -> dict:
@@ -838,6 +1314,7 @@ class OpenAIChatTranslator(BaseTranslator):
         if request.strict_style_retry:
             payload["style_retry"] = {
                 "strict_retry": True,
+                "retry_contract": request.strict_retry_mode,
                 "retry_reasons": request.style_retry_reasons,
                 "previous_emitted_cues": [
                     {"cue_index": cue.cue_index, "text": cue.text}
@@ -886,8 +1363,7 @@ class OpenAIChatTranslator(BaseTranslator):
         model: str,
         system_prompt: str,
         payload: dict,
-        cue_count: int,
-        schema_name: str,
+        response_format: dict,
         temperature: float,
         example_messages: List[dict] | None = None,
     ) -> dict:
@@ -899,7 +1375,7 @@ class OpenAIChatTranslator(BaseTranslator):
                 + [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             ),
             "temperature": temperature,
-            "response_format": _build_phase_schema(cue_count=cue_count, schema_name=schema_name),
+            "response_format": response_format,
         }
 
     def parse_chat_completion_response_body(self, payload: dict) -> PhaseTranslationResult:
@@ -918,6 +1394,20 @@ class OpenAIChatTranslator(BaseTranslator):
         risk_flags = [normalize_text(str(flag)) for flag in parsed.get("risk_flags", []) if normalize_text(str(flag))]
         return PhaseTranslationResult(emitted_cues=emitted_cues, risk_flags=list(dict.fromkeys(risk_flags)))
 
+    def parse_offending_only_phase_response_body(
+        self,
+        payload: dict,
+        request: TranslationRequest,
+    ) -> PhaseTranslationResult:
+        message = payload["choices"][0]["message"]
+        if message.get("refusal"):
+            raise RuntimeError(f"Model refused request: {message['refusal']}")
+        content = _extract_message_text(message.get("content"))
+        parsed = json.loads(content)
+        rewrites = parsed.get("offending_cue_rewrites", [])
+        risk_flags = [normalize_text(str(flag)) for flag in parsed.get("risk_flags", []) if normalize_text(str(flag))]
+        return _splice_offending_cue_rewrites(request, rewrites, risk_flags)
+
     def build_phase1_request_body(self, request: TranslationRequest) -> dict:
         strict_style_retry = request.strict_style_retry
         return self.build_chat_completion_request_body(
@@ -927,15 +1417,29 @@ class OpenAIChatTranslator(BaseTranslator):
                     self.config,
                     strict_style_retry=True,
                     style_retry_reasons=request.style_retry_reasons,
+                    strict_retry_mode=request.strict_retry_mode,
                 )
                 if strict_style_retry
                 else self.phase1_system_prompt
             ),
             payload=self._payload_for_phase1(request),
-            cue_count=len(request.block.cues),
-            schema_name="subtitle_phase1_strict" if strict_style_retry else "subtitle_phase1",
+            response_format=(
+                _build_offending_retry_schema(
+                    cue_count=len(request.offending_cue_indices),
+                    schema_name="subtitle_phase1_strict_offending_only",
+                )
+                if strict_style_retry and request.strict_retry_mode == "offending_cue_only"
+                else _build_phase_schema(
+                    cue_count=len(request.block.cues),
+                    schema_name="subtitle_phase1_strict" if strict_style_retry else "subtitle_phase1",
+                )
+            ),
             temperature=0.0 if strict_style_retry else self.config.phase1_temperature,
-            example_messages=self.phase1_strict_example_messages if strict_style_retry else self.phase1_example_messages,
+            example_messages=(
+                self.phase1_strict_offending_only_example_messages
+                if strict_style_retry and request.strict_retry_mode == "offending_cue_only"
+                else self.phase1_strict_example_messages if strict_style_retry else self.phase1_example_messages
+            ),
         )
 
     def build_repair_request_body(self, request: RepairRequest) -> dict:
@@ -943,27 +1447,28 @@ class OpenAIChatTranslator(BaseTranslator):
             model=self.repair_model,
             system_prompt=self.repair_system_prompt,
             payload=self._payload_for_repair(request),
-            cue_count=len(request.block.cues),
-            schema_name="subtitle_phase2_repair",
+            response_format=_build_phase_schema(
+                cue_count=len(request.block.cues),
+                schema_name="subtitle_phase2_repair",
+            ),
             temperature=self.config.repair_temperature,
         )
 
-    def _structured_completion(
+    def _structured_completion_with_parser(
         self,
         model: str,
         system_prompt: str,
         payload: dict,
-        cue_count: int,
-        schema_name: str,
+        response_format: dict,
         temperature: float,
+        parser,
         example_messages: List[dict] | None = None,
     ) -> PhaseTranslationResult:
         data = self.build_chat_completion_request_body(
             model=model,
             system_prompt=system_prompt,
             payload=payload,
-            cue_count=cue_count,
-            schema_name=schema_name,
+            response_format=response_format,
             temperature=temperature,
             example_messages=example_messages,
         )
@@ -996,7 +1501,7 @@ class OpenAIChatTranslator(BaseTranslator):
                     time.sleep(delay)
                     continue
                 response.raise_for_status()
-                return self.parse_chat_completion_response_body(response.json())
+                return parser(response.json())
             except requests.HTTPError as exc:
                 last_exc = exc
                 raise
@@ -1018,15 +1523,68 @@ class OpenAIChatTranslator(BaseTranslator):
             raise last_exc
         raise RuntimeError("Structured completion failed without a concrete exception.")
 
+    def _structured_completion(
+        self,
+        model: str,
+        system_prompt: str,
+        payload: dict,
+        response_format: dict,
+        temperature: float,
+        example_messages: List[dict] | None = None,
+    ) -> PhaseTranslationResult:
+        return self._structured_completion_with_parser(
+            model=model,
+            system_prompt=system_prompt,
+            payload=payload,
+            response_format=response_format,
+            temperature=temperature,
+            parser=self.parse_chat_completion_response_body,
+            example_messages=example_messages,
+        )
+
     def translate_block(self, request: TranslationRequest) -> PhaseTranslationResult:
-        return self._structured_completion(
+        strict_style_retry = request.strict_style_retry
+        strict_retry_mode = request.strict_retry_mode
+        system_prompt = (
+            build_phase1_system_prompt(
+                self.config,
+                strict_style_retry=True,
+                style_retry_reasons=request.style_retry_reasons,
+                strict_retry_mode=strict_retry_mode,
+            )
+            if strict_style_retry
+            else self.phase1_system_prompt
+        )
+        response_format = (
+            _build_offending_retry_schema(
+                cue_count=len(request.offending_cue_indices),
+                schema_name="subtitle_phase1_strict_offending_only",
+            )
+            if strict_style_retry and strict_retry_mode == "offending_cue_only"
+            else _build_phase_schema(
+                cue_count=len(request.block.cues),
+                schema_name="subtitle_phase1_strict" if strict_style_retry else "subtitle_phase1",
+            )
+        )
+        example_messages = (
+            self.phase1_strict_offending_only_example_messages
+            if strict_style_retry and strict_retry_mode == "offending_cue_only"
+            else self.phase1_strict_example_messages if strict_style_retry else self.phase1_example_messages
+        )
+        parser = (
+            (lambda payload: self.parse_offending_only_phase_response_body(payload, request))
+            if strict_style_retry and strict_retry_mode == "offending_cue_only"
+            else self.parse_chat_completion_response_body
+        )
+        temperature = 0.0 if strict_style_retry else self.config.phase1_temperature
+        return self._structured_completion_with_parser(
             model=self.phase1_model,
-            system_prompt=self.build_phase1_request_body(request)["messages"][0]["content"],
+            system_prompt=system_prompt,
             payload=self._payload_for_phase1(request),
-            cue_count=len(request.block.cues),
-            schema_name="subtitle_phase1_strict" if request.strict_style_retry else "subtitle_phase1",
-            temperature=0.0 if request.strict_style_retry else self.config.phase1_temperature,
-            example_messages=self.phase1_strict_example_messages if request.strict_style_retry else self.phase1_example_messages,
+            response_format=response_format,
+            temperature=temperature,
+            parser=parser,
+            example_messages=example_messages,
         )
 
     def repair_block(self, request: RepairRequest) -> PhaseTranslationResult:
@@ -1034,8 +1592,10 @@ class OpenAIChatTranslator(BaseTranslator):
             model=self.repair_model,
             system_prompt=self.repair_system_prompt,
             payload=self._payload_for_repair(request),
-            cue_count=len(request.block.cues),
-            schema_name="subtitle_phase2_repair",
+            response_format=_build_phase_schema(
+                cue_count=len(request.block.cues),
+                schema_name="subtitle_phase2_repair",
+            ),
             temperature=self.config.repair_temperature,
         )
 
