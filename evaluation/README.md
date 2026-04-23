@@ -223,3 +223,38 @@ python3 run_review_eval_batch.py finalize \
   --strict-output evaluation/batch/hard40_strict_output.jsonl \
   --output evaluation/cs231n_sp25_eval_hard40_translated_batch.jsonl
 ```
+
+## Shipping Failure Corpus
+
+When the immediate question is shipping-lane quality rather than continuation-tail replay, build a shipping failure corpus from broad full-pipeline outputs:
+
+```bash
+python3 build_shipping_failure_corpus.py \
+  --inputs \
+    evaluation/cs231n_sp25_eval_hard40_translated_round37_full_pipeline.jsonl \
+    evaluation/cs231n_sp25_eval_heldout10_internal_translated_round37_full_pipeline.jsonl \
+  --output evaluation/cs231n_sp25_shipping_failure_corpus_round37.jsonl
+```
+
+Rows are selected when any of the following is true:
+
+- `repair_invoked && !repair_accepted`
+- `smaller_block_fallback == true`
+- `post_wrap_failure == true`
+
+Each selected row includes `shipping_failure_meta` with:
+
+- `selection_reasons`
+- `failure_families`
+- `failure_reasons`
+- `pre_wrap_failures`
+- `post_wrap_failures`
+- merged `benchmarks` / `lanes` / `source_runs` provenance when the same row appears in overlapping benchmark inputs
+
+Current family split is intentionally broad:
+
+- `english_residual`
+- `fallback_trigger`
+- `wrap_readability`
+
+Use this corpus to inspect broad shipping bottlenecks such as low repair utility, fallback trigger quality, and post-wrap readability failures without reopening continuation-tail behavior.
