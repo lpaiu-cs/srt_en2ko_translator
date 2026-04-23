@@ -11,6 +11,7 @@ from subtitle_translator.pipeline import (
     _choose_better_style_candidate,
     _continuation_detector_miss_feedback,
     _protected_cue_indices_for_spans,
+    _strict_retry_prompt_profile_override,
     _wrap_phase_result,
 )
 from subtitle_translator.quality import post_wrap_gate, pre_wrap_gate
@@ -130,6 +131,36 @@ class StyleActionTests(unittest.TestCase):
         self.assertEqual(rejection_causes, [])
         self.assertEqual(final_result.emitted_cues[1].text, "실제로 진전을 이루기 위해서요.")
         self.assertEqual(_protected_cue_indices_for_spans(block, offending_spans), [1020])
+
+    def test_continuation_restore_missing_tail_uses_v3_prompt_override(self) -> None:
+        offending_spans = [
+            {
+                "cue_index": 192,
+                "source_tail_type": "continuation_tail",
+                "preferred_action": "restore_missing_tail",
+            }
+        ]
+        override = _strict_retry_prompt_profile_override(
+            self.config,
+            offending_spans,
+            protected_cue_indices=[191],
+        )
+        self.assertEqual(override, "fragment_preserving_v3")
+
+    def test_non_continuation_restore_missing_tail_does_not_use_v3_override(self) -> None:
+        offending_spans = [
+            {
+                "cue_index": 1021,
+                "source_tail_type": "purpose_tail",
+                "preferred_action": "restore_missing_tail",
+            }
+        ]
+        override = _strict_retry_prompt_profile_override(
+            self.config,
+            offending_spans,
+            protected_cue_indices=[1020],
+        )
+        self.assertIsNone(override)
 
     def test_purpose_tail_post_normalization_salvages_overclosed_candidate(self) -> None:
         block = TranslationBlock(

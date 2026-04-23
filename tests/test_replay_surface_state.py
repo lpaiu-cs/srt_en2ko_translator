@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from collect_continuation_signature_rows import _matches as _watchlist_matches
 from run_review_eval import (
     _current_accept_mode,
     _current_surfaced_actions,
@@ -148,6 +149,40 @@ class ReplaySurfaceStateTests(unittest.TestCase):
             "style_retry_trace": {"rejection_causes": ["restore_tail_overclosed_for_continuation"]},
         }
         self.assertEqual(_style_retry_rejection_subtype(local_signals), "local_meaning_not_restored")
+
+    def test_watchlist_match_with_stage_and_subtype_filters(self) -> None:
+        row = {
+            "id": "lecture::block-1",
+            "current_block": {
+                "source_cues": [
+                    {"cue_index": 1, "text": "setup"},
+                    {"cue_index": 2, "text": "from these interactions."},
+                ]
+            },
+            "pipeline_signals": {
+                "style_retry_invoked": True,
+                "style_retry_rejection_stage": "strict_retry_selector",
+                "style_retry_rejection_subtype": "local_meaning_not_restored",
+                "style_retry_trace": {
+                    "offending_cue_indices": [2],
+                    "protected_cue_indices": [1],
+                },
+            },
+        }
+        self.assertTrue(
+            _watchlist_matches(
+                row,
+                stages={"strict_retry_selector"},
+                subtypes={"local_meaning_not_restored"},
+            )
+        )
+        self.assertFalse(
+            _watchlist_matches(
+                row,
+                stages={"strict_retry_overedit"},
+                subtypes={"local_meaning_not_restored"},
+            )
+        )
 
 
 if __name__ == "__main__":

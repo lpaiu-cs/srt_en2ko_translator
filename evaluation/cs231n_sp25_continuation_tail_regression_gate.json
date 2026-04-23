@@ -1,0 +1,92 @@
+{
+  "schema_version": "continuation_regression_gate_v1",
+  "source_style_only": "evaluation/cs231n_sp25_restore_missing_tail_replay_round35_style_only_eval.jsonl",
+  "source_full_pipeline": "evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl",
+  "rows": [
+    {
+      "id": "Stanford CS231N   Spring 2025   Lecture 11 Large Scale Distributed Training::block-0657",
+      "lecture": "Stanford CS231N   Spring 2025   Lecture 11 Large Scale Distributed Training",
+      "tail_type": "continuation_tail",
+      "style_only": {
+        "transition": "accepted->unsurfaced->not_invoked",
+        "stage": "not_invoked",
+        "subtype": null,
+        "not_invoked_reason": "acceptable_absorption"
+      },
+      "full_pipeline": {
+        "transition": "accepted->unsurfaced->not_invoked",
+        "stage": "not_invoked",
+        "subtype": null,
+        "not_invoked_reason": "acceptable_absorption"
+      }
+    },
+    {
+      "id": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language::block-0078",
+      "lecture": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language",
+      "tail_type": "continuation_tail",
+      "style_only": {
+        "transition": "rejected->unsurfaced->not_invoked",
+        "stage": "not_invoked",
+        "subtype": null,
+        "not_invoked_reason": "acceptable_absorption"
+      },
+      "full_pipeline": {
+        "transition": "rejected->unsurfaced->not_invoked",
+        "stage": "not_invoked",
+        "subtype": null,
+        "not_invoked_reason": "acceptable_absorption"
+      }
+    },
+    {
+      "id": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language::block-0101",
+      "lecture": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language",
+      "tail_type": "continuation_tail",
+      "style_only": {
+        "transition": "rejected->surfaced_same_action->strict_direct_accept",
+        "stage": "accepted",
+        "subtype": null,
+        "not_invoked_reason": null
+      },
+      "full_pipeline": {
+        "transition": "rejected->surfaced_same_action->strict_direct_accept",
+        "stage": "accepted",
+        "subtype": null,
+        "not_invoked_reason": null
+      }
+    },
+    {
+      "id": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language::block-0124",
+      "lecture": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 16 Vision and Language",
+      "tail_type": "continuation_tail",
+      "style_only": {
+        "transition": "accepted->surfaced_same_action->strict_direct_accept",
+        "stage": "accepted",
+        "subtype": null,
+        "not_invoked_reason": null
+      },
+      "full_pipeline": {
+        "transition": "accepted->surfaced_same_action->strict_direct_accept",
+        "stage": "accepted",
+        "subtype": null,
+        "not_invoked_reason": null
+      }
+    },
+    {
+      "id": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 18 Human-Centered AI::block-0211",
+      "lecture": "Stanford CS231N Deep Learning for Computer Vision   Spring 2025   Lecture 18 Human-Centered AI",
+      "tail_type": "continuation_tail",
+      "style_only": {
+        "transition": "accepted->surfaced_same_action->strict_direct_accept",
+        "stage": "accepted",
+        "subtype": null,
+        "not_invoked_reason": null
+      },
+      "full_pipeline": {
+        "transition": "accepted->surfaced_same_action->strict_direct_accept",
+        "stage": "accepted",
+        "subtype": null,
+        "not_invoked_reason": null
+      }
+    }
+  ]
+}

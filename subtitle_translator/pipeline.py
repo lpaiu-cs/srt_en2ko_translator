@@ -811,6 +811,7 @@ def _run_phase1_style_retry(
     translator: BaseTranslator,
     glossary_terms: list,
     metrics: Optional[TranslationMetrics],
+    prompt_profile_override: str | None = None,
 ) -> tuple[Optional[PhaseTranslationResult], List[str]]:
     offending_cue_index_set = {
         int(span["cue_index"])
@@ -836,6 +837,7 @@ def _run_phase1_style_retry(
         glossary_terms=glossary_terms,
         strict_style_retry=True,
         strict_retry_mode=strict_retry_mode,
+        prompt_profile_override=prompt_profile_override,
         style_retry_reasons=style_retry_reasons,
         previous_emitted_cues=phase1_result.emitted_cues,
         protected_cue_indices=protected_cue_indices,
@@ -1048,6 +1050,33 @@ def _strict_accept_mode(post_normalizations: Sequence[dict]) -> str:
     return "postnorm_salvaged_accept" if post_normalizations else "strict_direct_accept"
 
 
+def _strict_retry_prompt_profile_override(
+    config: RuntimeConfig,
+    offending_spans: Sequence[dict],
+    protected_cue_indices: Sequence[int],
+) -> str | None:
+    if config.phase1_prompt_profile != "fragment_preserving_v2":
+        return None
+    if not protected_cue_indices:
+        return None
+    offending_cue_indices = {
+        int(span["cue_index"])
+        for span in offending_spans
+        if isinstance(span.get("cue_index"), int)
+    }
+    if len(offending_cue_indices) != 1:
+        return None
+    if not offending_spans:
+        return None
+    if all(
+        span.get("preferred_action") == "restore_missing_tail"
+        and span.get("source_tail_type") == "continuation_tail"
+        for span in offending_spans
+    ):
+        return "fragment_preserving_v3"
+    return None
+
+
 def _translate_block_recursive(
     block: TranslationBlock,
     translator: BaseTranslator,
@@ -1202,6 +1231,11 @@ def _translate_block_recursive(
         )
         if style_retry_reasons:
             protected_cue_indices = _protected_cue_indices_for_spans(block, offending_spans)
+            strict_retry_prompt_profile = _strict_retry_prompt_profile_override(
+                config,
+                offending_spans,
+                protected_cue_indices,
+            )
             if metrics:
                 metrics.note_style_action_attempts(offending_spans, channel="strict_retry")
                 metrics.style_retry_trace["reasons"] = list(style_retry_reasons)
@@ -1210,6 +1244,7 @@ def _translate_block_recursive(
                 metrics.style_retry_trace["offending_spans"] = list(offending_spans)
                 metrics.style_retry_trace["preferred_actions"] = list(preferred_actions)
                 metrics.style_retry_trace["forced_invocation_reason"] = not_invoked_reason
+                metrics.style_retry_trace["prompt_profile"] = strict_retry_prompt_profile or config.phase1_prompt_profile
             strict_phase1, strict_retry_failures = _run_phase1_style_retry(
                 block,
                 final_result,
@@ -1221,6 +1256,7 @@ def _translate_block_recursive(
                 translator,
                 glossary_terms,
                 metrics,
+                prompt_profile_override=strict_retry_prompt_profile,
             )
             if metrics and metrics.style_retry_trace is not None:
                 metrics.style_retry_trace["strict_retry_mode"] = (

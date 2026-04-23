@@ -114,6 +114,88 @@ Replay outputs also expose:
 - `replay_transition`: `historical_outcome -> current surface_state -> current accept_mode`
 - `style_retry_rejection_stage`: coarse current-lane stage such as `strict_retry_selector`, `strict_retry_generation`, `strict_retry_postwrap`, `strict_retry_overedit`, or `not_invoked`
 
+## Continuation Continuation-Selector Branch
+
+Continuation-tail behavior should still be reopened narrowly, not broadly.
+
+Use the round35 replay outputs as the stable-head regression source:
+
+- `evaluation/cs231n_sp25_restore_missing_tail_replay_round35_style_only_eval.jsonl`
+- `evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl`
+
+Build the fixed 5-row continuation regression gate with:
+
+```bash
+python3 build_continuation_regression_gate.py \
+  --style-only evaluation/cs231n_sp25_restore_missing_tail_replay_round35_style_only_eval.jsonl \
+  --full-pipeline evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl \
+  --output evaluation/cs231n_sp25_continuation_tail_regression_gate.json
+```
+
+The original freeze threshold was:
+
+- at least 3 stable-head rows with this signature
+
+That threshold has now been met by the round33 harvest. Keep using the same signature when reopening continuation-tail changes:
+
+- `tail_type = continuation_tail`
+- `surface_state = surfaced_same_action`
+- `style_retry_rejection_stage in {strict_retry_overedit, strict_retry_selector, strict_retry_unknown}`
+- `style_retry_rejection_subtype in {null, local_meaning_not_restored}`
+- exactly one offending cue and at least one protected cue
+
+Collect those rows with:
+
+```bash
+python3 collect_continuation_signature_rows.py \
+  --inputs \
+    evaluation/cs231n_sp25_restore_missing_tail_replay_round35_style_only_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_style_only_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_full_pipeline_eval.jsonl \
+  --output evaluation/cs231n_sp25_continuation_tail_signature_watchlist.jsonl
+```
+
+Even after reopening, keep continuation-tail changes narrow:
+
+- do not broaden continuation invocation generically
+- do not add continuation deterministic salvage
+- keep the 5-row continuation regression gate as the minimum non-regression set
+- target only the harvested `strict_retry_selector | local_meaning_not_restored` and `strict_retry_overedit` branches
+
+Current stable-head policy:
+
+- the global prompt profile remains `fragment_preserving_v2`
+- the runtime auto-promotes only the narrow continuation strict-retry branch
+  (`restore_missing_tail` + `continuation_tail` + single offending cue + protected cue present)
+  onto `fragment_preserving_v3`
+- subtype watchlists should be harvested separately for:
+  - `strict_retry_selector | local_meaning_not_restored`
+  - `strict_retry_overedit`
+
+Split subtype watchlists with:
+
+```bash
+python3 collect_continuation_signature_rows.py \
+  --inputs \
+    evaluation/cs231n_sp25_restore_missing_tail_replay_round35_style_only_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_style_only_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_full_pipeline_eval.jsonl \
+  --stages strict_retry_selector \
+  --subtypes local_meaning_not_restored \
+  --output evaluation/cs231n_sp25_continuation_tail_signature_watchlist_local_meaning.jsonl
+
+python3 collect_continuation_signature_rows.py \
+  --inputs \
+    evaluation/cs231n_sp25_restore_missing_tail_replay_round35_style_only_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_replay_round35_full_pipeline_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_style_only_eval.jsonl \
+    evaluation/cs231n_sp25_restore_missing_tail_probe_continuation200_round35_full_pipeline_eval.jsonl \
+  --stages strict_retry_overedit \
+  --output evaluation/cs231n_sp25_continuation_tail_signature_watchlist_overedit.jsonl
+```
+
 For larger frozen evals where synchronous rate limits add noise, use the Batch lane:
 
 ```bash

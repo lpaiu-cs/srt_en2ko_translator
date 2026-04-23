@@ -53,7 +53,7 @@ python3 -m pip install requests
 - `SRT_OPENAI_MODEL`: backward-compatible alias for `SRT_PHASE1_MODEL`.
 - `SRT_REPAIR_MODEL`: default Phase2 repair model. Defaults to `gpt-4o`.
 - `SRT_PHASE1_TEMPERATURE`, `SRT_REPAIR_TEMPERATURE`: generation temperatures. For eval A/B runs, `0.0` reduces comparison noise.
-- `SRT_PHASE1_PROMPT_PROFILE`: Phase1 prompt/example profile. Defaults to `fragment_preserving_v2`. Keep `fragment_preserving_v1` for frozen baseline comparisons.
+- `SRT_PHASE1_PROMPT_PROFILE`: Phase1 prompt/example profile. Defaults to `fragment_preserving_v2`. Keep `fragment_preserving_v1` for frozen baseline comparisons. `fragment_preserving_v3` is still not the global default, but the runtime now auto-promotes the narrow continuation strict-retry branch (`restore_missing_tail` + `continuation_tail` + single offending cue + protected cue present) onto `v3`.
 - `SRT_TRANSLATION_CONTEXT`: optional domain/context hint.
 - `SRT_TRANSLATION_STYLE`: optional tone/style hint.
 - `SRT_USE_CONTEXT_WINDOW`: whether to provide left/right source context.
