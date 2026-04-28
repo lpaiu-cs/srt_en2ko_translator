@@ -79,11 +79,25 @@ def _translated_cues(row: dict) -> list[Cue]:
     return cues
 
 
+def _config_for_row(row: dict):
+    config = load_runtime_config(glossary_log_path="")
+    provenance = row.get("provenance") or {}
+    if provenance.get("max_chars_per_line") is not None:
+        config.max_chars_per_line = int(provenance["max_chars_per_line"])
+    if provenance.get("max_lines_per_cue") is not None:
+        config.max_lines_per_cue = int(provenance["max_lines_per_cue"])
+    if provenance.get("max_cps") is not None:
+        config.max_cps = float(provenance["max_cps"])
+    if provenance.get("wrap_policy"):
+        config.wrap_policy = str(provenance["wrap_policy"])
+    return config
+
+
 def _final_post_wrap_gate(row: dict):
     cues = _translated_cues(row)
     if not cues:
         return None
-    config = load_runtime_config(glossary_log_path="")
+    config = _config_for_row(row)
     return post_wrap_gate(cues, config)
 
 

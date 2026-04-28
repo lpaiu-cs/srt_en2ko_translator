@@ -17,12 +17,14 @@ def _row(
     pre_wrap_failures: dict[str, int] | None = None,
     post_wrap_failures: dict[str, int] | None = None,
     translated_cues: list[dict] | None = None,
+    provenance: dict | None = None,
 ) -> dict:
     return {
         "id": row_id,
         "translation_output": {
             "translated_cues": translated_cues or [],
         },
+        "provenance": provenance or {},
         "pipeline_signals": {
             "repair_invoked": repair_invoked,
             "repair_accepted": repair_accepted,
@@ -122,6 +124,53 @@ class ShippingFailureCorpusTests(unittest.TestCase):
                 selected[0]["shipping_failure_meta"]["final_post_wrap_reasons"],
                 ["line_overflow"],
             )
+
+    def test_collect_rows_final_postwrap_only_uses_row_runtime_thresholds(self) -> None:
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "cs231n_sp25_eval_hard40_translated_round47_full_pipeline.jsonl"
+            rows = [
+                _row(
+                    row_id="hard::runtime-ok",
+                    repair_invoked=True,
+                    repair_accepted=True,
+                    post_wrap_failure=True,
+                    failure_reasons={"line_overflow": 1},
+                    post_wrap_failures={"line_overflow": 1},
+                    translated_cues=[
+                        {
+                            "cue_index": 1,
+                            "start": "00:00:00,000",
+                            "end": "00:00:04,000",
+                            "text": "12345678901234567890123456789",
+                        }
+                    ],
+                    provenance={"max_chars_per_line": 30, "max_lines_per_cue": 2, "max_cps": 18.0, "wrap_policy": "baseline"},
+                ),
+                _row(
+                    row_id="hard::runtime-bad",
+                    repair_invoked=True,
+                    repair_accepted=False,
+                    post_wrap_failure=True,
+                    failure_reasons={"line_overflow": 1},
+                    post_wrap_failures={"line_overflow": 1},
+                    translated_cues=[
+                        {
+                            "cue_index": 2,
+                            "start": "00:00:00,000",
+                            "end": "00:00:04,000",
+                            "text": "12345678901234567890123456789",
+                        }
+                    ],
+                    provenance={"max_chars_per_line": 28, "max_lines_per_cue": 2, "max_cps": 18.0, "wrap_policy": "baseline"},
+                ),
+            ]
+            input_path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+
+            selected = collect_rows([input_path], final_postwrap_only=True)
+            self.assertEqual([row["id"] for row in selected], ["hard::runtime-bad"])
 
 
 if __name__ == "__main__":
