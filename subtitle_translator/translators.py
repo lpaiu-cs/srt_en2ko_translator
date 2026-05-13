@@ -1449,6 +1449,10 @@ def build_repair_system_prompt_for_profile(config: RuntimeConfig, repair_profile
         "Preserve numbers, formulas, brackets, and glossary terms.",
         "Prefer not to leave the first cue empty.",
         "Improve natural Korean and line readability while respecting timing anchors.",
+        f"Hard line constraints: each cue must fit within at most {config.max_lines_per_cue} line(s), "
+        f"with at most {config.max_chars_per_line} characters per line after runtime wrapping.",
+        "When failure_reasons include line_overflow, compact the cue text enough to satisfy those hard line constraints; do not rely on manual line breaks alone.",
+        "For overlong single-cue subtitles, remove filler and repeated lecture phrasing while preserving source meaning and technical anchors.",
         "Fix only the listed failures.",
         "Leave unaffected cues unchanged whenever possible.",
         "Change as little as possible.",
@@ -1524,6 +1528,10 @@ def _repair_example_messages(repair_profile: str) -> List[dict]:
             }
         ],
         "failure_reasons": ["line_overflow"],
+        "line_constraints": {
+            "max_lines_per_cue": 2,
+            "max_chars_per_line": 24,
+        },
         "glossary_terms": [],
     }
     assistant_payload = {
@@ -1678,6 +1686,10 @@ class OpenAIChatTranslator(BaseTranslator):
                 for cue in request.phase1_result.emitted_cues
             ],
             "failure_reasons": request.failure_reasons,
+            "line_constraints": {
+                "max_lines_per_cue": self.config.max_lines_per_cue,
+                "max_chars_per_line": self.config.max_chars_per_line,
+            },
             "glossary_terms": [
                 {"source": term.source, "target": term.target, "note": term.note, "mode": term.mode}
                 for term in request.glossary_terms

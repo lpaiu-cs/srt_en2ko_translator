@@ -53,6 +53,7 @@ class TranslationMetrics:
     style_action_accept_modes_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_action_tail_accept_modes_by_channel: Dict[str, Dict[str, int]] = field(default_factory=dict)
     style_retry_trace: Dict[str, Any] = field(default_factory=dict)
+    english_fallback_replacements: Dict[str, int] = field(default_factory=dict)
     effective_repair_profile: str | None = None
     glossary_hard_violations: int = 0
     front_sparse_count: int = 0
@@ -166,6 +167,12 @@ class TranslationMetrics:
                 if channel:
                     self._bump_channel_counter(self.style_action_tail_accept_modes_by_channel, channel, tail_key)
 
+    def note_english_fallback_replacements(self, replacements: Iterable[Dict[str, Any]]) -> None:
+        for replacement in replacements:
+            source = str(replacement.get("source", ""))
+            if source:
+                self.english_fallback_replacements[source] = self.english_fallback_replacements.get(source, 0) + 1
+
     def average_cps(self) -> float:
         if self.final_cue_count == 0:
             return 0.0
@@ -199,6 +206,7 @@ class TranslationMetrics:
             "post_wrap_failures": self.post_wrap_failures,
             "phase1_risk_flags": self.phase1_risk_flags,
             "strict_retry_candidate_risk_flags": self.strict_retry_candidate_risk_flags,
+            "english_fallback_replacements": self.english_fallback_replacements,
             "style_retry_rejection_causes": self.style_retry_rejection_causes,
             "style_action_attempts": self.style_action_attempts,
             "style_action_accepts": self.style_action_accepts,

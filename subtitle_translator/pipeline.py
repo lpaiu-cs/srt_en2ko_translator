@@ -8,6 +8,11 @@ from typing import List, Optional, Sequence, Tuple
 
 from .blocks import build_translation_blocks
 from .config import RuntimeConfig
+from .english_terms import (
+    apply_approved_english_fallbacks,
+    approved_english_glossary_terms_for_block,
+    merge_glossary_terms,
+)
 from .glossary import GlossaryStore
 from .metrics import TranslationMetrics
 from .models import Cue, EmittedCue, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
@@ -119,13 +124,17 @@ def _style_risk_occurrences(result: PhaseTranslationResult, reasons: Sequence[st
     return sum(1 for risk_flag in result.risk_flags if risk_flag in allowed_risks)
 
 
-def _single_cue_wrap_score(cue: Cue, config: RuntimeConfig) -> tuple[tuple[int, int, int, int, int], object]:
+def _single_cue_wrap_score(cue: Cue, config: RuntimeConfig) -> tuple[tuple[int, int, int, int, int, int, int], object]:
     gate = post_wrap_gate([cue], config)
     lines = cue.text.splitlines() if cue.text else []
     max_line_len = max((len(line) for line in lines), default=0)
+    line_count_overflow = max(0, len(lines) - config.max_lines_per_cue)
+    char_overflow = sum(max(0, len(line) - config.max_chars_per_line) for line in lines)
     imbalance = abs(len(lines[0].strip()) - len(lines[1].strip())) if len(lines) == 2 else 0
     score = (
         len(gate.repair_reasons),
+        line_count_overflow,
+        char_overflow,
         len(gate.warning_reasons),
         max_line_len,
         imbalance,
@@ -683,10 +692,10 @@ def _tail_type_specific_restore_rejection_causes(candidate_text: str, source_tai
     return rejection_causes
 
 
-def _glossary_terms_for_block(block: TranslationBlock, glossary_store: Optional[GlossaryStore]) -> list:
-    if not glossary_store:
-        return []
-    return glossary_store.relevant_terms([cue.text for cue in block.cues])
+def _glossary_terms_for_block(block: TranslationBlock, glossary_store: Optional[GlossaryStore], config: RuntimeConfig) -> list:
+    base_terms = glossary_store.relevant_terms([cue.text for cue in block.cues]) if glossary_store else []
+    approved_terms = approved_english_glossary_terms_for_block(block.cues, config)
+    return merge_glossary_terms(base_terms, approved_terms)
 
 
 def _split_block(block: TranslationBlock) -> List[TranslationBlock]:
@@ -1092,7 +1101,7 @@ def _translate_block_recursive(
     if metrics:
         metrics.blocks_started += 1
 
-    glossary_terms = _glossary_terms_for_block(block, glossary_store)
+    glossary_terms = _glossary_terms_for_block(block, glossary_store, config)
     phase1_result, phase1_attempts, phase1_failure_reasons = _run_phase1_with_retry(block, translator, glossary_terms, config)
 
     if metrics:
@@ -1495,6 +1504,14 @@ def translate_srt(
                 ancestor_failure_signatures=(),
             )
         )
+    output, english_fallback_replacements = apply_approved_english_fallbacks(cues, output, config)
+    if english_fallback_replacements:
+        output = [
+            _wrap_cue_with_local_rewrap(cue, cue.text, config, None)
+            for cue in output
+        ]
+        if metrics:
+            metrics.note_english_fallback_replacements(english_fallback_replacements)
     if metrics:
         metrics.note_final_cues(output)
     return output

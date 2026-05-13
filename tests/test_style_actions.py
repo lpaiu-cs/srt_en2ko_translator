@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 
 from subtitle_translator.config import load_runtime_config
-from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
+from subtitle_translator.english_terms import (
+    apply_approved_english_fallbacks,
+    approved_english_glossary_terms_for_block,
+    merge_glossary_terms,
+)
+from subtitle_translator.models import Cue, EmittedCue, GlossaryEntry, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
 from subtitle_translator.pipeline import (
     _apply_deterministic_style_micro_edits,
     _apply_purpose_tail_post_normalization,
@@ -15,7 +20,12 @@ from subtitle_translator.pipeline import (
     _wrap_phase_result,
 )
 from subtitle_translator.quality import post_wrap_gate, pre_wrap_gate
-from subtitle_translator.translators import _repair_profile_for_request, _splice_offending_cue_rewrites
+from subtitle_translator.translators import (
+    OpenAIChatTranslator,
+    _repair_profile_for_request,
+    _splice_offending_cue_rewrites,
+    build_repair_system_prompt_for_profile,
+)
 
 
 class StyleActionTests(unittest.TestCase):
@@ -298,6 +308,44 @@ class StyleActionTests(unittest.TestCase):
         )
         self.assertEqual(_repair_profile_for_request(self.config, request), "baseline")
 
+    def test_local_rewrap_splits_dense_korean_into_two_valid_lines(self) -> None:
+        self.config.max_lines_per_cue = 2
+        dense_text = "가" * (self.config.max_chars_per_line + 6)
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:10,000", text="dense source")]
+        )
+        result = PhaseTranslationResult(emitted_cues=[EmittedCue(cue_index=1, text=dense_text)])
+
+        wrapped = _wrap_phase_result(block, result, self.config, None)
+        lines = wrapped[0].text.splitlines()
+
+        self.assertLessEqual(len(lines), self.config.max_lines_per_cue)
+        self.assertTrue(all(len(line) <= self.config.max_chars_per_line for line in lines))
+        self.assertFalse(post_wrap_gate(wrapped, self.config).repair_needed)
+
+    def test_repair_prompt_and_payload_expose_line_constraints(self) -> None:
+        prompt = build_repair_system_prompt_for_profile(self.config, "baseline")
+        self.assertIn(f"at most {self.config.max_lines_per_cue} line", prompt)
+        self.assertIn(f"at most {self.config.max_chars_per_line} characters", prompt)
+        self.assertIn("line_overflow", prompt)
+
+        request = RepairRequest(
+            block=TranslationBlock(
+                cues=[Cue(index=1, start="00:00:00,000", end="00:00:03,000", text="source")]
+            ),
+            phase1_result=PhaseTranslationResult(emitted_cues=[EmittedCue(cue_index=1, text="번역")]),
+            failure_reasons=["line_overflow"],
+        )
+        translator = OpenAIChatTranslator.__new__(OpenAIChatTranslator)
+        translator.config = self.config
+        payload = translator._payload_for_repair(request)
+        self.assertEqual(
+            payload["line_constraints"],
+            {
+                "max_lines_per_cue": self.config.max_lines_per_cue,
+                "max_chars_per_line": self.config.max_chars_per_line,
+            },
+        )
 
     def test_restore_missing_tail_rejects_purpose_tail_without_purpose_marker(self) -> None:
         block = TranslationBlock(
@@ -373,6 +421,61 @@ class StyleActionTests(unittest.TestCase):
         gate = pre_wrap_gate(block, emitted, [], self.config)
         self.assertTrue(gate.repair_needed)
         self.assertIn("english_residual", gate.repair_reasons)
+
+    def test_english_residual_warning_details_include_terms(self) -> None:
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="source")],
+        )
+        emitted = [EmittedCue(cue_index=1, text="framework를 한국어 문장 안에서 아주 짧게 한 번만 언급하고 넘어갑니다")]
+        gate = pre_wrap_gate(block, emitted, [], self.config)
+
+        self.assertIn("english_residual_warn", gate.warning_reasons)
+        self.assertEqual(gate.warning_details["english_residual_warn"][0]["term"], "framework")
+        self.assertEqual(gate.warning_details["english_residual_warn"][0]["cue_index"], 1)
+
+    def test_technical_english_warning_details_include_terms(self) -> None:
+        self.config.english_residual_policy = "technical_split"
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="AlexNet and RMSProp")],
+        )
+        emitted = [EmittedCue(cue_index=1, text="AlexNet과 RMSProp")]
+        gate = pre_wrap_gate(block, emitted, [], self.config)
+
+        self.assertIn("english_residual_technical", gate.warning_reasons)
+        self.assertEqual(
+            [detail["term"] for detail in gate.warning_details["english_residual_technical"]],
+            ["AlexNet", "RMSProp"],
+        )
+
+    def test_approved_english_terms_become_hard_glossary_terms(self) -> None:
+        self.config.allowed_english_terms.append("alexnet")
+        block = TranslationBlock(
+            cues=[Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="AlexNet was the first example")],
+        )
+
+        terms = approved_english_glossary_terms_for_block(block.cues, self.config)
+
+        self.assertEqual(terms[0].source, "AlexNet")
+        self.assertEqual(terms[0].target, "AlexNet")
+        self.assertEqual(terms[0].mode, "hard")
+
+    def test_approved_english_glossary_overrides_existing_korean_alias(self) -> None:
+        merged = merge_glossary_terms(
+            [GlossaryEntry(source="AlexNet", target="알렉스넷", mode="hard")],
+            [GlossaryEntry(source="AlexNet", target="AlexNet", mode="hard")],
+        )
+
+        self.assertEqual(merged[0].target, "AlexNet")
+
+    def test_approved_english_fallback_replaces_declared_korean_alias(self) -> None:
+        self.config.english_fallback_terms = [{"source": "AlexNet", "aliases": ["알렉스넷"]}]
+        source = [Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="AlexNet was the first example")]
+        output = [Cue(index=1, start="00:00:00,000", end="00:00:02,000", text="알렉스넷이 첫 예시였습니다.")]
+
+        rewritten, replacements = apply_approved_english_fallbacks(source, output, self.config)
+
+        self.assertEqual(rewritten[0].text, "AlexNet이 첫 예시였습니다.")
+        self.assertEqual(replacements[0]["source"], "AlexNet")
 
     def test_cps_relaxed_wrap_policy_suppresses_warn_near_threshold(self) -> None:
         block = TranslationBlock(

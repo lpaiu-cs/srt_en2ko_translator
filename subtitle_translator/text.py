@@ -95,6 +95,39 @@ def _punctuation_two_line_wrap(text: str, width: int) -> str:
     return best
 
 
+def _is_latin_word_split(text: str, idx: int) -> bool:
+    if idx <= 0 or idx >= len(text):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9]", text[idx - 1]) and re.fullmatch(r"[A-Za-z0-9]", text[idx]))
+
+
+def _character_two_line_wrap(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+
+    best = _wrap_lines_greedy(text, width)
+    best_score = None
+    for split_at in range(1, len(text)):
+        if _is_latin_word_split(text, split_at):
+            continue
+        left = text[:split_at].strip()
+        right = text[split_at:].strip()
+        if not left or not right:
+            continue
+        left_len = len(left)
+        right_len = len(right)
+        overflow = max(0, left_len - width) + max(0, right_len - width)
+        whitespace_penalty = 0 if text[split_at - 1].isspace() or text[split_at].isspace() else 1
+        punctuation_penalty = 0 if left.endswith((",", ".", "!", "?", ":", ";")) else 1
+        balance_penalty = abs(left_len - right_len)
+        max_len_penalty = max(left_len, right_len)
+        score = (overflow, whitespace_penalty, punctuation_penalty, balance_penalty, max_len_penalty)
+        if best_score is None or score < best_score:
+            best = f"{left}\n{right}"
+            best_score = score
+    return best
+
+
 def wrap_lines(text: str, width: int = 42) -> str:
     return _wrap_lines_greedy(text, width)
 
@@ -110,6 +143,7 @@ def wrap_lines_candidates(text: str, width: int = 42, max_lines: int = 2) -> Lis
         _punctuation_two_line_wrap(normalized, width),
     ]
     if max_lines >= 2:
+        candidates.append(_character_two_line_wrap(normalized, width))
         if width > 10:
             candidates.append(_wrap_lines_greedy(normalized, width - 2))
         if width > 14:

@@ -161,6 +161,33 @@ def _english_residual_reasons(output_text: str, glossary_terms: List[GlossaryEnt
     return [], ["english_residual_warn"]
 
 
+def _english_residual_span_details(
+    emitted_cues: List[EmittedCue],
+    glossary_terms: List[GlossaryEntry],
+    config: RuntimeConfig,
+) -> tuple[List[dict], List[dict]]:
+    allowed = _allowed_english_terms(glossary_terms, config)
+    residual_details: List[dict] = []
+    technical_details: List[dict] = []
+    for cue in emitted_cues:
+        cue_text = normalize_text(cue.text)
+        for match in _ENGLISH_SPAN_RE.finditer(cue_text):
+            span = match.group(0)
+            detail = {
+                "cue_index": cue.cue_index,
+                "term": span,
+                "normalized_term": span.casefold(),
+                "span_text": span,
+                "output_text": cue_text,
+            }
+            if _is_technical_carry_through_span(span, allowed):
+                if config.english_residual_policy == "technical_split" and span.casefold() not in allowed:
+                    technical_details.append({**detail, "issue": "english_residual_technical"})
+                continue
+            residual_details.append({**detail, "issue": "english_residual"})
+    return residual_details, technical_details
+
+
 def _normalize_numeric_token(token: str) -> str:
     return token.strip(" \t\r\n.,!?;:'\"-–—")
 
@@ -471,6 +498,17 @@ def pre_wrap_gate(
     english_repair, english_warn = _english_residual_reasons(output_text, glossary_terms, config)
     repair.extend(english_repair)
     warnings.extend(english_warn)
+    residual_details, technical_details = _english_residual_span_details(emitted_cues, glossary_terms, config)
+    if "english_residual" in english_repair and residual_details:
+        warning_details["english_residual"] = [
+            {**detail, "issue": "english_residual"} for detail in residual_details
+        ]
+    if "english_residual_warn" in english_warn and residual_details:
+        warning_details["english_residual_warn"] = [
+            {**detail, "issue": "english_residual_warn"} for detail in residual_details
+        ]
+    if "english_residual_technical" in english_warn and technical_details:
+        warning_details["english_residual_technical"] = technical_details
     fragment_details = _fragment_overclosure_details(block, tgt_texts)
     if fragment_details:
         for issue in _unique(detail["issue"] for detail in fragment_details):
