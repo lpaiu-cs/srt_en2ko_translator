@@ -1,167 +1,51 @@
-# Translator
+# 🎬 영어 SRT -> 한국어 자막 번역기 (SRT Translator)
 
-English SRT to Korean subtitle translator with cue-preserving output, structured model responses, bounded repair, and batch processing.
+자막의 원본 타이밍과 인덱스를 완벽하게 보존하면서 자연스러운 한국어로 번역해주는 도구입니다.
 
-## Features
+## ✨ 주요 기능
+- **완벽한 타이밍 보존**: 원본 영어 자막의 싱크(큐 타이밍과 인덱스)를 그대로 유지합니다.
+- **문맥을 고려한 자연스러운 번역**: 문장을 단순히 1:1로 번역하지 않고, 자막의 길이와 구두점을 기준으로 적절한 단위(블록)를 나누어 번역합니다.
+- **고품질 자막 생성**: 가독성을 위해 초당 글자 수(CPS)와 줄 바꿈을 자동으로 최적화합니다.
+- **자동 오류 복구**: 번역이 어색하거나 자막 길이를 초과하는 경우, 해당 부분만 AI가 다시 번역하여 품질을 높입니다.
+- **용어집 지원**: 특정 고유명사나 전문 용어를 일관되게 번역할 수 있습니다.
+- **배치 처리**: 폴더 내의 여러 SRT 파일을 한 번에 일괄 번역할 수 있습니다.
 
-- Preserves original cue timing and cue indices.
-- Builds small dynamic translation blocks instead of translating the whole sentence at once.
-- Separates `context window`, `translation unit`, and `emission unit`.
-- Uses Phase1 structured output for exact cue-count preservation.
-- Applies deterministic quality gates before and after line wrapping.
-- Tries local re-wrap strategies before escalating post-wrap failures to repair or smaller-block fallback.
-- Sends only failed blocks to a bounded Phase2 repair model.
-- Caps retry, repair, and recursive split depth to avoid oscillating fallback behavior.
-- Supports reusable glossary logs with `hard` and `soft` term modes.
-- Writes per-file JSONL metrics for tuning prompt, block size, and repair policy.
-- Supports single-file and folder-based batch translation.
+## 🚀 시작하기
 
-## Pipeline
-
-1. Build a translation block of 2-4 cues using punctuation, gap, duration, and source-length limits.
-2. Send the block to Phase1 and require structured output with `emitted_cues` and `risk_flags`.
-3. Validate schema and cue structure. If structure fails, retry Phase1 and then fall back to smaller blocks.
-4. Run a pre-wrap gate for alignment, glossary, anchor, English residual, and front/tail concentration checks.
-5. Apply line wrapping, then try local re-wrap strategies if the first wrap fails post-wrap checks.
-6. Run a post-wrap gate for line overflow, CPS, and bad line break checks.
-7. If needed, send only that block to Phase2 repair with a bounded rewrite prompt.
-8. If the block still fails, split it into smaller blocks instead of using proportional redistribution.
-9. Stop recursive fallback when split depth is exhausted or the same failure signature repeats.
-
-## Repository Layout
-
-- `srt_en2ko_translator.py`: single-file CLI entrypoint.
-- `batch_translate_srt.py`: folder-based batch runner.
-- `subtitle_translator/`: core package.
-- `translation_artifacts/`: local glossary logs and other generated artifacts.
-
-## Setup
-
-1. Create a virtual environment if you want isolation.
-2. Install dependencies:
+### 1. 설치 및 준비
+Python 환경이 필요합니다. (가상 환경 사용을 권장합니다.)
 
 ```bash
+# 필수 패키지 설치
 python3 -m pip install requests
 ```
 
-3. Copy `.env.example` to `.env` and fill in at least `OPENAI_API_KEY`.
-
-## Environment Variables
-
-- `OPENAI_API_KEY`: required API key.
-- `SRT_PHASE1_MODEL`: default Phase1 model. Defaults to `gpt-4.1-mini`.
-- `SRT_OPENAI_MODEL`: backward-compatible alias for `SRT_PHASE1_MODEL`.
-- `SRT_REPAIR_MODEL`: default Phase2 repair model. Defaults to `gpt-4o`.
-- `SRT_PHASE1_TEMPERATURE`, `SRT_REPAIR_TEMPERATURE`: generation temperatures. For eval A/B runs, `0.0` reduces comparison noise.
-- `SRT_PHASE1_PROMPT_PROFILE`: Phase1 prompt/example profile. Defaults to `fragment_preserving_v2`. Keep `fragment_preserving_v1` for frozen baseline comparisons. `fragment_preserving_v3` is still not the global default, but the runtime now auto-promotes the narrow continuation strict-retry branch (`restore_missing_tail` + `continuation_tail` + single offending cue + protected cue present) onto `v3`.
-- `SRT_TRANSLATION_CONTEXT`: optional domain/context hint.
-- `SRT_TRANSLATION_STYLE`: optional tone/style hint.
-- `SRT_USE_CONTEXT_WINDOW`: whether to provide left/right source context.
-- `SRT_ENABLE_REPAIR`: enables bounded Phase2 repair.
-- `SRT_REPAIR_POLICY`: repair policy variant. `baseline` keeps current bounded repair behavior; `compact_technical_fragment_v1` only targets single-cue dependent-end technical fragments with `line_overflow`.
-- `SRT_ENGLISH_RESIDUAL_POLICY`: `coarse` keeps the old routing. `technical_split` downgrades allowed technical carry-through to warning-only so repair focuses on actual residual English.
-- `SRT_PHASE1_MAX_RETRIES`, `SRT_PHASE2_MAX_REPAIRS`, `SRT_MAX_SPLIT_DEPTH`: retry and recursion guardrails.
-- `SRT_GLOSSARY_LOG_PATH`: glossary JSONL log path.
-- `SRT_METRICS_LOG_PATH`: per-file JSONL metrics log path.
-- `SRT_GLOSSARY_MAX_TERMS`: max glossary entries injected per request.
-- `SRT_ALLOWED_ENGLISH_TERMS`: comma-separated technical terms allowed to remain in output.
-- `SRT_REQUEST_TIMEOUT`: request timeout in seconds.
-- `SRT_REQUEST_MAX_ATTEMPTS`, `SRT_REQUEST_BACKOFF_MIN_SECONDS`, `SRT_REQUEST_BACKOFF_MAX_SECONDS`: synchronous debug/eval retry backoff for rate limits and transient server errors.
-- `SRT_BLOCK_MIN_CUES`, `SRT_BLOCK_MAX_CUES`, `SRT_BLOCK_MAX_DURATION_MS`, `SRT_BLOCK_MAX_SOURCE_CHARS`, `SRT_BLOCK_MAX_GAP_MS`: block builder controls.
-- `SRT_MAX_CHARS_PER_LINE`, `SRT_MAX_LINES_PER_CUE`, `SRT_MAX_CPS`: readability thresholds. Current default line width is `28`, based on shipping-lane wrap A/B against the round40 wrap-readability set.
-- `SRT_WRAP_POLICY`: wrap/readability policy variant. `baseline` keeps current behavior; `cps_relaxed_v1` relaxes only warning-level CPS gating for wrap A/B runs.
-
-## CS231n Preset
-
-The old hard-coded lecture preset is now expressed through `.env`:
-
-- `SRT_TRANSLATION_CONTEXT=These subtitles are the Stanford CS231n lecture on computer vision and deep learning.`
-- `SRT_TRANSLATION_STYLE=Translate in a spoken lecture style for Korean subtitles. Use polite sentence-final endings only when the source thought is actually complete. For unfinished fragments, incomplete clauses, or carry-context blocks, non-final fragment endings are acceptable and preferred. Do not add generic explanatory endings that are not directly supported by the source.`
-
-## Single File Usage
+### 2. 환경 변수 설정
+`.env.example` 파일을 복사하여 `.env` 파일을 만들고 OpenAI API 키를 입력하세요.
 
 ```bash
-python srt_en2ko_translator.py input.srt -o output.ko.srt --model gpt-4.1-mini --repair-model gpt-4o
+cp .env.example .env
+```
+`.env` 파일 내용:
+```env
+OPENAI_API_KEY=your_openai_api_key_here
 ```
 
-Useful flags:
+## 💻 사용 방법
 
-- `--block-max-cues 4`
-- `--glossary-log-path translation_artifacts/cs231n.jsonl`
-- `--disable-context-window`
-- `--openai-base-url ...`
-
-## Batch Usage
-
+### 단일 파일 번역
+하나의 SRT 파일을 번역할 때 사용합니다.
 ```bash
-python batch_translate_srt.py ./cs231n_sp25/eng --model gpt-4.1-mini --repair-model gpt-4o --skip-existing --recursive
+python srt_en2ko_translator.py input.srt -o output.ko.srt
 ```
 
-Batch runs reuse one translator instance and one glossary log, which helps keep terminology consistent across a lecture series.
-
-## Evaluation
-
-Build a real review set from the CS231n Spring 2025 English SRT files:
-
+### 폴더 일괄 번역 (배치 처리)
+폴더 내의 모든 SRT 파일을 한 번에 번역합니다. 강의 영상이나 시리즈물 번역 시 용어의 일관성을 유지하는 데 유리합니다.
 ```bash
-python3 build_eval_set.py --input-dir cs231n_sp25/eng --output evaluation/cs231n_sp25_eval.jsonl --target-count 40
+python batch_translate_srt.py ./eng_subtitles_folder --skip-existing --recursive
 ```
 
-Replay the current pipeline against a reviewed set:
+## 🛠 더 알아보기 (개발자용 문서)
+이 번역기는 내부적으로 복잡한 품질 검증(Quality Gates)과 복구 파이프라인(Repair Pipeline)을 통해 동작합니다. 개발 목적의 상세 설정(프롬프트, 모델 변경 등), 파이프라인 구조, 평가(Evaluation) 가이드는 아래 문서를 참고하세요.
 
-```bash
-python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated.jsonl
-```
-
-For prompt A/B runs, freeze the original block boundaries and lower Phase1 temperature:
-
-```bash
-python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jsonl --output evaluation/cs231n_sp25_eval_translated_frozen.jsonl --frozen-blocks --phase1-temperature 0.0 --prompt-profile fragment_preserving_v2
-```
-
-For larger frozen-block evals, keep synchronous replay for micro debugging and use the Batch lane for clean rate-limit isolation:
-
-```bash
-python3 run_review_eval_batch.py prepare-phase1 \
-  --input evaluation/cs231n_sp25_eval_hard40_boundary_aware.jsonl \
-  --requests-out evaluation/batch/hard40_phase1_requests.jsonl \
-  --manifest-out evaluation/batch/hard40_phase1_manifest.jsonl \
-  --phase1-temperature 0.0 \
-  --prompt-profile fragment_preserving_v2
-```
-
-Then upload/create the batch, download the phase1 output, prepare the strict-retry batch, and finalize:
-
-```bash
-python3 run_review_eval_batch.py submit --input-jsonl evaluation/batch/hard40_phase1_requests.jsonl
-python3 run_review_eval_batch.py prepare-style-retry \
-  --phase1-manifest evaluation/batch/hard40_phase1_manifest.jsonl \
-  --phase1-output evaluation/batch/hard40_phase1_output.jsonl \
-  --requests-out evaluation/batch/hard40_strict_requests.jsonl \
-  --manifest-out evaluation/batch/hard40_retry_manifest.jsonl
-python3 run_review_eval_batch.py finalize \
-  --retry-manifest evaluation/batch/hard40_retry_manifest.jsonl \
-  --strict-output evaluation/batch/hard40_strict_output.jsonl \
-  --output evaluation/cs231n_sp25_eval_hard40_translated_batch.jsonl
-```
-
-The translated eval JSONL records provenance (`phase1_model`, `repair_model`, temperatures, `prompt_profile`, `git_sha`) together with block lint state and captured Phase1 risk flags. Current manual review tags are centered on translation behavior rather than the older grouping-only pass:
-
-- `translation_error`
-- `awkward_local_closure`
-- `omission_addition`
-- `glossary_mismatch`
-- `english_residual`
-
-Use those tags in each entry's `review.failure_tags`, and note whether the issue came from a frozen-block A/B run or a dynamic-block replay.
-
-## Core Modules
-
-- `config.py`: `.env` loading and runtime config.
-- `blocks.py`: dynamic block building and context window selection.
-- `srt_io.py`: SRT parsing and writing.
-- `grouping.py`: sentence grouping heuristics used for context windows.
-- `glossary.py`: glossary persistence and retrieval.
-- `quality.py`: structure validation plus pre-wrap/post-wrap gates.
-- `translators.py`: model adapter and structured output handling.
-- `pipeline.py`: retry, repair, split fallback, and final orchestration.
+- [👉 개발자 가이드 (Developer Guide)](docs/DEVELOPER_GUIDE.md)
