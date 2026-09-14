@@ -6,6 +6,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+import requests
+
 from .blocks import build_translation_blocks
 from .config import RuntimeConfig
 from .english_terms import (
@@ -740,6 +742,8 @@ def _run_phase1_with_retry(
         attempts = attempt + 1
         try:
             result = _run_phase1_once(block, translator, glossary_terms)
+        except requests.RequestException:
+            raise
         except Exception as exc:
             last_reasons = ["phase1_exception"]
             signature = _failure_signature(last_reasons)
@@ -789,6 +793,8 @@ def _run_phase2_repair(
                 metrics.effective_repair_profile = repair_profile_fn(repair_request)
         try:
             repaired = translator.repair_block(repair_request)
+        except requests.RequestException:
+            raise
         except Exception as exc:
             signature = ("phase2_exception",)
             warn(f"Phase2 repair attempt {attempt + 1} failed for cues {[cue.index for cue in block.cues]}: {exc}")
@@ -812,6 +818,22 @@ def _run_phase2_repair(
     return None
 
 
+def _strict_retry_mode(offending_spans: Sequence[dict], protected_cue_indices: Sequence[int]) -> str:
+    offending_indices = {span["cue_index"] for span in offending_spans if isinstance(span.get("cue_index"), int)}
+    if (
+        len(offending_indices) == 1
+        and protected_cue_indices
+        and any(span.get("trigger_reason") == "detector_miss" for span in offending_spans)
+        and all(
+            span.get("preferred_action") == "restore_missing_tail"
+            and span.get("source_tail_type") == "continuation_tail"
+            for span in offending_spans
+        )
+    ):
+        return "offending_cue_only"
+    return "full_block"
+
+
 def _run_phase1_style_retry(
     block: TranslationBlock,
     phase1_result: PhaseTranslationResult,
@@ -825,30 +847,13 @@ def _run_phase1_style_retry(
     metrics: Optional[TranslationMetrics],
     prompt_profile_override: str | None = None,
 ) -> tuple[Optional[PhaseTranslationResult], List[str]]:
-    offending_cue_index_set = {
-        int(span["cue_index"])
-        for span in offending_spans
-        if isinstance(span.get("cue_index"), int)
-    }
-    strict_retry_mode = "full_block"
-    if (
-        len(offending_cue_index_set) == 1
-        and protected_cue_indices
-        and any(span.get("trigger_reason") == "detector_miss" for span in offending_spans)
-        and all(
-            span.get("preferred_action") == "restore_missing_tail"
-            and span.get("source_tail_type") == "continuation_tail"
-            for span in offending_spans
-        )
-    ):
-        strict_retry_mode = "offending_cue_only"
     if metrics:
         metrics.style_retry_invocations += 1
     request = TranslationRequest(
         block=block,
         glossary_terms=glossary_terms,
         strict_style_retry=True,
-        strict_retry_mode=strict_retry_mode,
+        strict_retry_mode=_strict_retry_mode(offending_spans, protected_cue_indices),
         prompt_profile_override=prompt_profile_override,
         style_retry_reasons=style_retry_reasons,
         previous_emitted_cues=phase1_result.emitted_cues,
@@ -859,6 +864,8 @@ def _run_phase1_style_retry(
     )
     try:
         retried = translator.translate_block(request)
+    except requests.RequestException:
+        raise
     except Exception as exc:
         warn(
             f"Strict Phase1 retry failed for cues {[cue.index for cue in block.cues]} "
@@ -1133,8 +1140,10 @@ def _translate_block_recursive(
                 )
             return output
 
-        if len(block.cues) == 1 and metrics:
-            metrics.single_cue_source_fallbacks += 1
+        if metrics:
+            metrics.source_fallback_cues += len(block.cues)
+            if len(block.cues) == 1:
+                metrics.single_cue_source_fallbacks += 1
         warn(f"Preserving source text for cues {[cue.index for cue in block.cues]} after Phase1 structure failure")
         return _wrap_phase_result(block, _fallback_source_result(block, "phase1_structure_failure"), config, metrics)
 
@@ -1274,20 +1283,7 @@ def _translate_block_recursive(
                 prompt_profile_override=strict_retry_prompt_profile,
             )
             if metrics and metrics.style_retry_trace is not None:
-                metrics.style_retry_trace["strict_retry_mode"] = (
-                    "offending_cue_only"
-                    if (
-                        len({int(span["cue_index"]) for span in offending_spans if isinstance(span.get("cue_index"), int)}) == 1
-                        and protected_cue_indices
-                        and any(span.get("trigger_reason") == "detector_miss" for span in offending_spans)
-                        and all(
-                            span.get("preferred_action") == "restore_missing_tail"
-                            and span.get("source_tail_type") == "continuation_tail"
-                            for span in offending_spans
-                        )
-                    )
-                    else "full_block"
-                )
+                metrics.style_retry_trace["strict_retry_mode"] = _strict_retry_mode(offending_spans, protected_cue_indices)
             if strict_phase1 is not None:
                 raw_strict_phase1 = strict_phase1
                 strict_phase1, strict_post_normalizations = _apply_purpose_tail_post_normalization(
@@ -1490,6 +1486,8 @@ def translate_srt(
     glossary_store: Optional[GlossaryStore] = None,
     metrics: Optional[TranslationMetrics] = None,
 ) -> List[Cue]:
+    metrics = metrics if metrics is not None else TranslationMetrics()
+    initial_source_fallbacks = metrics.source_fallback_cues
     blocks = build_translation_blocks(cues, config)
     output: List[Cue] = []
     for block in blocks:
@@ -1504,7 +1502,17 @@ def translate_srt(
                 ancestor_failure_signatures=(),
             )
         )
-    output, english_fallback_replacements = apply_approved_english_fallbacks(cues, output, config)
+    source_fallbacks = metrics.source_fallback_cues - initial_source_fallbacks
+    if source_fallbacks:
+        raise RuntimeError(f"Translation incomplete: {source_fallbacks} cue(s) retained source text; output not saved")
+    return _finalize_translated_cues(cues, output, config, metrics)
+
+
+def _finalize_translated_cues(
+    source_cues: List[Cue], output: List[Cue], config: RuntimeConfig,
+    metrics: Optional[TranslationMetrics] = None,
+) -> List[Cue]:
+    output, english_fallback_replacements = apply_approved_english_fallbacks(source_cues, output, config)
     if english_fallback_replacements:
         output = [
             _wrap_cue_with_local_rewrap(cue, cue.text, config, None)

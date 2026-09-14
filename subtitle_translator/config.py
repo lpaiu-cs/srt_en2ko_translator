@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -256,6 +256,12 @@ def load_runtime_config(glossary_log_path: Optional[str] = None) -> RuntimeConfi
             os.getenv("SRT_ENGLISH_RESIDUAL_POLICY", "coarse").strip() or "coarse"
         ),
     )
+
+
+def runtime_settings(config: RuntimeConfig) -> dict[str, Any]:
+    """Effective settings for replay, excluding credentials and machine-local paths."""
+    return {key: value for key, value in asdict(config).items()
+            if key != "openai_api_key" and not key.endswith("_path")}
 
 
 def positive_int(value: str) -> int:

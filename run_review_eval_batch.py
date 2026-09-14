@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -17,28 +17,49 @@ from subtitle_translator import (
     build_translator,
     create_glossary_store,
     load_runtime_config,
-    read_srt,
 )
+from run_review_eval import _git_sha, _hydrate_frozen_block
+from subtitle_translator.config import runtime_settings
 from subtitle_translator.openai_batch import OpenAIBatchClient, parse_batch_output_line
 from subtitle_translator.pipeline import (
     _apply_deterministic_style_micro_edits,
     _apply_purpose_tail_post_normalization,
     _candidate_is_overedited,
     _choose_better_style_candidate,
+    _effective_style_retry_feedback,
     _fallback_source_result,
+    _finalize_translated_cues,
+    _glossary_terms_for_block,
     _offending_cue_diffs,
     _protected_cue_indices_for_spans,
     _serialize_emitted_cues,
     _strict_accept_mode,
+    _strict_retry_mode,
+    _strict_retry_prompt_profile_override,
     _style_spans_for_actions,
     _style_warning_action_details,
-    _style_retry_candidate_reasons,
-    _style_retry_feedback,
     _wrap_phase_result,
 )
 from subtitle_translator.quality import post_wrap_gate, pre_wrap_gate, validate_phase_structure
 from subtitle_translator.splitting import ts_to_ms
 from subtitle_translator.text import normalize_text
+
+
+def _manifest_config(config, row: dict, args):
+    provenance = row.get("strict_provenance") or row["provenance"]
+    saved = provenance.get("runtime_config", {})
+    allowed = runtime_settings(config)
+    config = replace(config, **{key: value for key, value in saved.items() if key in allowed})
+    if args.model:
+        config.phase1_model = args.model
+    if args.repair_model:
+        config.repair_model = args.repair_model
+    if args.phase1_temperature is not None:
+        config.phase1_temperature = max(0.0, args.phase1_temperature)
+    if args.prompt_profile:
+        config.phase1_prompt_profile = args.prompt_profile
+    config.repair_enabled = False
+    return config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -151,29 +172,6 @@ def _average_cps(cues: Iterable[Cue]) -> float:
     return total / max(count, 1)
 
 
-def _git_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd="/Users/lpaiu/study/25-2/Translator",
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-def _load_cues_by_source(entries: List[dict]) -> Dict[str, List[Cue]]:
-    cues_by_source: Dict[str, List[Cue]] = {}
-    for source_file in sorted({entry["source_file"] for entry in entries}):
-        cues_by_source[source_file] = read_srt(source_file)
-    return cues_by_source
-
-
-def _cue_from_dict(item: dict) -> Cue:
-    return Cue(index=item["cue_index"], start=item["start"], end=item["end"], text=item["text"])
-
-
 def _emitted_from_dicts(items: List[dict]) -> List[EmittedCue]:
     return [EmittedCue(cue_index=item["cue_index"], text=item["text"]) for item in items]
 
@@ -193,16 +191,7 @@ def _phase_result_to_dict(result: PhaseTranslationResult) -> dict:
 
 
 def _hydrate_block(record: dict) -> TranslationBlock:
-    block_data = record["current_block"]
-    lint = block_data.get("block_lint", {})
-    return TranslationBlock(
-        cues=[_cue_from_dict(cue) for cue in block_data["source_cues"]],
-        previous_source_sentences=list(block_data.get("previous_source_sentences", [])),
-        next_source_sentences=list(block_data.get("next_source_sentences", [])),
-        low_confidence=bool(lint.get("low_confidence", False)),
-        lint_reasons=list(lint.get("lint_reasons", [])),
-        lint_actions=list(lint.get("lint_actions", [])),
-    )
+    return _hydrate_frozen_block(record)
 
 
 def _parse_batch_output(path: Path) -> Dict[str, dict]:
@@ -214,7 +203,7 @@ def _parse_batch_output(path: Path) -> Dict[str, dict]:
     return outputs
 
 
-def _parse_batch_phase_result(translator, batch_row: dict) -> tuple[PhaseTranslationResult | None, List[str]]:
+def _parse_batch_phase_result(translator, batch_row: dict, request: TranslationRequest | None = None) -> tuple[PhaseTranslationResult | None, List[str]]:
     if not batch_row:
         return None, ["missing_batch_result"]
     if batch_row.get("error"):
@@ -225,6 +214,8 @@ def _parse_batch_phase_result(translator, batch_row: dict) -> tuple[PhaseTransla
     if status_code != 200 or not isinstance(body, dict):
         return None, [f"http_{status_code or 'unknown'}"]
     try:
+        if request is not None and request.strict_retry_mode == "offending_cue_only":
+            return translator.parse_offending_only_phase_response_body(body, request), []
         return translator.parse_chat_completion_response_body(body), []
     except Exception as exc:
         return None, [f"parse_error:{type(exc).__name__}"]
@@ -280,6 +271,7 @@ def _load_batch_provenance(path_str: str | None, prefix: str) -> dict:
 
 def _provenance(config, args) -> dict:
     return {
+        "runtime_config": runtime_settings(config),
         "schema_version": "translated_eval_record_v2",
         "phase1_model": args.model or config.phase1_model,
         "repair_model": args.repair_model or config.repair_model,
@@ -302,6 +294,8 @@ def _provenance(config, args) -> dict:
 
 def _load_config_from_args(args):
     config = load_runtime_config(glossary_log_path=getattr(args, "glossary_log_path", None))
+    config.phase1_model = args.model or config.phase1_model
+    config.repair_model = args.repair_model or config.repair_model
     if getattr(args, "phase1_temperature", None) is not None:
         config.phase1_temperature = max(0.0, args.phase1_temperature)
     if getattr(args, "prompt_profile", None):
@@ -320,7 +314,6 @@ def cmd_prepare_phase1(args) -> int:
     )
     glossary_store = create_glossary_store(config=config, glossary_log_path=args.glossary_log_path)
     entries = _load_entries(Path(args.input).expanduser())
-    cues_by_source = _load_cues_by_source(entries)
     requests_path = Path(args.requests_out).expanduser()
     manifest_path = Path(args.manifest_out).expanduser()
     requests_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,18 +322,8 @@ def cmd_prepare_phase1(args) -> int:
 
     with requests_path.open("w", encoding="utf-8") as req_handle, manifest_path.open("w", encoding="utf-8") as manifest_handle:
         for idx, entry in enumerate(entries, 1):
-            all_cues = cues_by_source[entry["source_file"]]
-            cue_index_set = set(entry.get("cue_indices") or entry.get("input_cue_indices") or entry["current_block"]["cue_indices"])
-            block_cues = [cue for cue in all_cues if cue.index in cue_index_set]
-            block = TranslationBlock(
-                cues=block_cues,
-                previous_source_sentences=list(entry.get("current_block", {}).get("previous_source_sentences", [])),
-                next_source_sentences=list(entry.get("current_block", {}).get("next_source_sentences", [])),
-                low_confidence=bool(entry.get("current_block", {}).get("block_lint", {}).get("low_confidence", False)),
-                lint_reasons=list(entry.get("current_block", {}).get("block_lint", {}).get("lint_reasons", [])),
-                lint_actions=list(entry.get("current_block", {}).get("block_lint", {}).get("lint_actions", [])),
-            )
-            glossary_terms = glossary_store.relevant_terms([cue.text for cue in block.cues])
+            block = _hydrate_block(entry)
+            glossary_terms = _glossary_terms_for_block(block, glossary_store, config)
             request = TranslationRequest(block=block, glossary_terms=glossary_terms)
             body = translator.build_phase1_request_body(request)
             custom_id = f"phase1-{idx:05d}"
@@ -391,13 +374,7 @@ def cmd_prepare_phase1(args) -> int:
 
 
 def cmd_prepare_style_retry(args) -> int:
-    config = _load_config_from_args(args)
-    translator = build_translator(
-        config=config,
-        model=args.model or config.phase1_model,
-        repair_model=args.repair_model or config.repair_model,
-        base_url=args.openai_base_url,
-    )
+    base_config = _load_config_from_args(args)
     phase1_manifest = _load_entries(Path(args.phase1_manifest).expanduser())
     phase1_outputs = _parse_batch_output(Path(args.phase1_output).expanduser())
     requests_path = Path(args.requests_out).expanduser()
@@ -407,6 +384,8 @@ def cmd_prepare_style_retry(args) -> int:
 
     with requests_path.open("w", encoding="utf-8") as req_handle, manifest_path.open("w", encoding="utf-8") as manifest_handle:
         for row in phase1_manifest:
+            config = _manifest_config(base_config, row, args)
+            translator = build_translator(config=config, base_url=args.openai_base_url)
             block = _hydrate_block(row)
             glossary_terms = _deserialize_glossary_terms(row.get("glossary_terms", []))
             phase1_result, phase1_errors = _parse_batch_phase_result(translator, phase1_outputs.get(row["custom_id"]))
@@ -423,6 +402,8 @@ def cmd_prepare_style_retry(args) -> int:
             preferred_actions: List[str] = []
             protected_cue_indices: List[int] = []
             strict_custom_id = None
+            effective_strict_prompt_profile = None
+            strict_retry_mode = "full_block"
             micro_edit_trace = {
                 "attempted": False,
                 "accepted": False,
@@ -435,12 +416,8 @@ def cmd_prepare_style_retry(args) -> int:
                 pre_gate = pre_wrap_gate(block, phase1_result.emitted_cues, glossary_terms, config)
                 wrapped = _wrap_phase_result(block, phase1_result, config, None)
                 post_gate = post_wrap_gate(wrapped, config)
-                style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
-                initial_offending_cue_indices, initial_offending_spans, initial_preferred_actions = _style_retry_feedback(
-                    block,
-                    pre_gate,
-                    post_gate,
-                    style_retry_reasons,
+                style_retry_reasons, _, initial_offending_spans, _, _ = _effective_style_retry_feedback(
+                    block, phase1_result, pre_gate, post_gate,
                 )
                 micro_edit_spans = _style_spans_for_actions(
                     initial_offending_spans,
@@ -485,23 +462,19 @@ def cmd_prepare_style_retry(args) -> int:
                     else:
                         micro_edit_trace["rejection_causes"] = ["deterministic_noop"]
 
-                style_retry_reasons = _style_retry_candidate_reasons(phase1_result, pre_gate, post_gate)
+                style_retry_reasons, offending_cue_indices, offending_spans, preferred_actions, _ = _effective_style_retry_feedback(
+                    block, phase1_result, pre_gate, post_gate,
+                )
                 if style_retry_reasons:
-                    offending_cue_indices, offending_spans, preferred_actions = _style_retry_feedback(
-                        block,
-                        pre_gate,
-                        post_gate,
-                        style_retry_reasons,
-                    )
-                    protected_cue_indices = [
-                        cue.index
-                        for cue in block.cues
-                        if cue.index not in set(offending_cue_indices)
-                    ]
+                    protected_cue_indices = _protected_cue_indices_for_spans(block, offending_spans)
+                    strict_retry_mode = _strict_retry_mode(offending_spans, protected_cue_indices)
+                    profile_override = _strict_retry_prompt_profile_override(config, offending_spans, protected_cue_indices)
                     strict_request = TranslationRequest(
                         block=block,
                         glossary_terms=glossary_terms,
                         strict_style_retry=True,
+                        strict_retry_mode=strict_retry_mode,
+                        prompt_profile_override=profile_override,
                         style_retry_reasons=style_retry_reasons,
                         previous_emitted_cues=phase1_result.emitted_cues,
                         protected_cue_indices=protected_cue_indices,
@@ -509,6 +482,7 @@ def cmd_prepare_style_retry(args) -> int:
                         offending_spans=offending_spans,
                         preferred_actions=preferred_actions,
                     )
+                    effective_strict_prompt_profile = translator._effective_prompt_profile(strict_request)
                     strict_custom_id = f"{row['custom_id']}:strict"
                     req_handle.write(
                         json.dumps(
@@ -527,7 +501,10 @@ def cmd_prepare_style_retry(args) -> int:
                 json.dumps(
                     {
                         **row,
-                        "schema_version": "review_eval_batch_retry_manifest_v1",
+                        "schema_version": "review_eval_batch_retry_manifest_v2",
+                        "strict_provenance": _provenance(config, args),
+                        "effective_strict_prompt_profile": effective_strict_prompt_profile,
+                        "strict_retry_mode": strict_retry_mode,
                         "raw_phase1_result": _phase_result_to_dict(raw_phase1_result) if raw_phase1_result is not None else None,
                         "phase1_result": _phase_result_to_dict(phase1_result) if phase1_result is not None else None,
                         "phase1_errors": phase1_errors,
@@ -550,13 +527,7 @@ def cmd_prepare_style_retry(args) -> int:
 
 
 def cmd_finalize(args) -> int:
-    config = _load_config_from_args(args)
-    translator = build_translator(
-        config=config,
-        model=args.model or config.phase1_model,
-        repair_model=args.repair_model or config.repair_model,
-        base_url=args.openai_base_url,
-    )
+    base_config = _load_config_from_args(args)
     retry_manifest = _load_entries(Path(args.retry_manifest).expanduser())
     strict_outputs = _parse_batch_output(Path(args.strict_output).expanduser()) if args.strict_output else {}
     output_path = Path(args.output).expanduser()
@@ -568,6 +539,8 @@ def cmd_finalize(args) -> int:
 
     with output_path.open("w", encoding="utf-8") as handle:
         for row in retry_manifest:
+            config = _manifest_config(base_config, row, args)
+            translator = build_translator(config=config, base_url=args.openai_base_url)
             block = _hydrate_block(row)
             glossary_terms = _deserialize_glossary_terms(row.get("glossary_terms", []))
             phase1_result = _phase_result_from_dict(row["phase1_result"]) if row.get("phase1_result") else None
@@ -601,28 +574,23 @@ def cmd_finalize(args) -> int:
                     "protected_cue_indices": list(row.get("protected_cue_indices", [])),
                     "offending_spans": list(row.get("offending_spans", [])),
                     "preferred_actions": list(row.get("preferred_actions", [])),
-                    "effective_strict_prompt_profile": (
-                        "fragment_preserving_v3"
-                        if (
-                            row["provenance"].get("prompt_profile") == "fragment_preserving_v2"
-                            and len(row.get("offending_cue_indices", [])) == 1
-                            and row.get("protected_cue_indices")
-                            and row.get("offending_spans")
-                            and all(
-                                span.get("preferred_action") == "restore_missing_tail"
-                                and span.get("source_tail_type") == "continuation_tail"
-                                for span in row.get("offending_spans", [])
-                            )
-                        )
-                        else row["provenance"].get("prompt_profile")
-                    ),
+                    "effective_strict_prompt_profile": row.get("effective_strict_prompt_profile"),
+                    "strict_retry_mode": row.get("strict_retry_mode", "full_block"),
                     "base_phase1_emitted_cues": _serialize_emitted_cues(
                         _phase_result_from_dict(row["raw_phase1_result"])
                     ) if row.get("raw_phase1_result") else (_serialize_emitted_cues(phase1_result) if phase1_result else []),
                     "micro_edit_trace": row.get("micro_edit_trace", {}),
                 }
                 if phase1_result is not None and style_retry_invoked:
-                    strict_result, strict_errors = _parse_batch_phase_result(translator, strict_outputs.get(row["strict_custom_id"]))
+                    strict_request = TranslationRequest(
+                        block=block,
+                        previous_emitted_cues=phase1_result.emitted_cues,
+                        strict_retry_mode=row.get("strict_retry_mode", "full_block"),
+                        offending_cue_indices=row.get("offending_cue_indices", []),
+                    )
+                    strict_result, strict_errors = _parse_batch_phase_result(
+                        translator, strict_outputs.get(row["strict_custom_id"]), strict_request,
+                    )
                     if strict_result is None:
                         style_retry_rejected = True
                         style_retry_trace["strict_candidate_raw_emitted_cues"] = []
@@ -666,14 +634,8 @@ def cmd_finalize(args) -> int:
                                 strict_post,
                                 row.get("style_retry_reasons", []),
                             ):
+                                accepted = False
                                 rejection_causes = ["overedited_candidate"]
-                                style_retry_rejected = True
-                                style_retry_trace["accept_mode"] = None
-                                style_retry_trace["accepted"] = False
-                                style_retry_trace["rejection_causes"] = rejection_causes
-                                style_retry_trace["strict_candidate_emitted_cues"] = _serialize_emitted_cues(strict_result)
-                                for cause in rejection_causes:
-                                    style_retry_rejection_causes[cause] = style_retry_rejection_causes.get(cause, 0) + 1
                             else:
                                 final_result, pre_gate, post_gate_result, accepted, rejection_causes = _choose_better_style_candidate(
                                     phase1_result,
@@ -704,6 +666,7 @@ def cmd_finalize(args) -> int:
                 )
 
             wrapped_final = _wrap_phase_result(block, final_result, config, None)
+            wrapped_final = _finalize_translated_cues(block.cues, wrapped_final, config)
             final_post = post_wrap_gate(wrapped_final, config)
             remaining_warning_spans = _style_warning_action_details(pre_gate, final_post)
             style_action_attempts: Dict[str, int] = {}
@@ -810,6 +773,7 @@ def cmd_finalize(args) -> int:
                     "repair_rejected": False,
                     "smaller_block_fallback": False,
                     "single_cue_source_fallback": phase1_result is None,
+                    "source_fallback_cues": len(block.cues) if phase1_result is None else 0,
                     "post_wrap_failure": bool(final_post.repair_reasons or final_post.warning_reasons),
                     "failure_reasons": {
                         reason: 1
@@ -855,7 +819,12 @@ def cmd_finalize(args) -> int:
                     "effective_repair_profile": row["provenance"].get("repair_policy"),
                     "style_retry_trace": style_retry_trace,
                 },
-                "provenance": {**row["provenance"], **batch_provenance},
+                "provenance": {
+                    **row["provenance"], **batch_provenance,
+                    "finalization_git_sha": _git_sha(),
+                    "finalization_runtime": runtime_settings(config),
+                    "strict_provenance": row.get("strict_provenance"),
+                },
                 "review": {
                     "status": "pending",
                     "failure_tags": [],

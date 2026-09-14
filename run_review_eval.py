@@ -11,13 +11,13 @@ from subtitle_translator import (
     TranslationMetrics,
     build_translator,
     create_glossary_store,
-    hydrate_translation_block,
     load_runtime_config,
     read_srt,
 )
 from subtitle_translator.blocks import build_translation_blocks
+from subtitle_translator.config import runtime_settings
 from subtitle_translator.models import Cue, PhaseTranslationResult, RepairRequest, TranslationBlock, TranslationRequest
-from subtitle_translator.pipeline import _translate_block_recursive
+from subtitle_translator.pipeline import _finalize_translated_cues, _translate_block_recursive
 from subtitle_translator.text import normalize_text
 from subtitle_translator.translators import BaseTranslator
 
@@ -135,7 +135,7 @@ def _git_sha() -> str:
     try:
         output = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd="/Users/lpaiu/study/25-2/Translator",
+            cwd=Path(__file__).resolve().parent,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -145,12 +145,7 @@ def _git_sha() -> str:
 
 
 def _block_dict_from_entry(entry: dict) -> dict:
-    return entry.get("current_block") or {
-        "cue_indices": entry["cue_indices"],
-        "source_cues": entry["source_cues"],
-        "source_text": entry.get("source_text", ""),
-        "block_lint": entry.get("block_lint", {"low_confidence": False, "lint_reasons": [], "lint_actions": []}),
-    }
+    return entry.get("current_block") or entry
 
 
 def _match_block(target_indices: List[int], blocks: List[TranslationBlock]) -> TranslationBlock:
@@ -173,13 +168,6 @@ def _match_block(target_indices: List[int], blocks: List[TranslationBlock]) -> T
     return best[3]
 
 
-def _load_cues_by_source(entries: List[dict]) -> Dict[str, List[Cue]]:
-    cues_by_source: Dict[str, List[Cue]] = {}
-    for source_file in sorted({entry["source_file"] for entry in entries}):
-        cues_by_source[source_file] = read_srt(source_file)
-    return cues_by_source
-
-
 def _build_dynamic_blocks(entries: List[dict], config) -> Dict[str, List[TranslationBlock]]:
     blocks_by_lecture: Dict[str, List[TranslationBlock]] = {}
     for lecture in sorted({entry["lecture"] for entry in entries}):
@@ -190,15 +178,20 @@ def _build_dynamic_blocks(entries: List[dict], config) -> Dict[str, List[Transla
     return blocks_by_lecture
 
 
-def _hydrate_frozen_block(entry: dict, all_cues: List[Cue], config) -> TranslationBlock:
+def _hydrate_frozen_block(entry: dict) -> TranslationBlock:
     block_data = _block_dict_from_entry(entry)
-    cue_index_set = set(block_data["cue_indices"])
-    block_cues = [cue for cue in all_cues if cue.index in cue_index_set]
+    block_cues = [
+        Cue(index=cue["cue_index"], start=cue["start"], end=cue["end"], text=cue["text"])
+        for cue in block_data["source_cues"]
+    ]
+    indices = [cue.index for cue in block_cues]
+    if not indices or indices != block_data["cue_indices"] or len(indices) != len(set(indices)):
+        raise ValueError(f"Invalid frozen cue snapshot for {entry.get('id', 'unknown row')}")
     block_lint = block_data.get("block_lint", {})
-    return hydrate_translation_block(
-        block_cues,
-        all_cues,
-        config,
+    return TranslationBlock(
+        cues=block_cues,
+        previous_source_sentences=list(block_data.get("previous_source_sentences", [])),
+        next_source_sentences=list(block_data.get("next_source_sentences", [])),
         low_confidence=bool(block_lint.get("low_confidence", False)),
         lint_reasons=list(block_lint.get("lint_reasons", [])),
         lint_actions=list(block_lint.get("lint_actions", [])),
@@ -329,6 +322,8 @@ def main() -> int:
     output_path = Path(args.output).expanduser()
 
     config = load_runtime_config(glossary_log_path=args.glossary_log_path)
+    config.phase1_model = args.model or config.phase1_model
+    config.repair_model = args.repair_model or config.repair_model
     if args.phase1_temperature is not None:
         config.phase1_temperature = max(0.0, args.phase1_temperature)
     if args.repair_temperature is not None:
@@ -349,10 +344,10 @@ def main() -> int:
     glossary_store = create_glossary_store(config=config, glossary_log_path=args.glossary_log_path)
 
     review_entries = _load_review_entries(review_path)
-    cues_by_source = _load_cues_by_source(review_entries)
     blocks_by_lecture = None if args.frozen_blocks else _build_dynamic_blocks(review_entries, config)
 
     provenance = {
+        "runtime_config": runtime_settings(config),
         "schema_version": "translated_eval_record_v2",
         "phase1_model": args.model or config.phase1_model,
         "repair_model": args.repair_model or config.repair_model,
@@ -374,9 +369,8 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         for entry in review_entries:
-            all_cues = cues_by_source[entry["source_file"]]
             if args.frozen_blocks:
-                block = _hydrate_frozen_block(entry, all_cues, config)
+                block = _hydrate_frozen_block(entry)
             else:
                 block = _match_block(_input_cue_indices(entry), blocks_by_lecture[entry["lecture"]])
 
@@ -391,13 +385,15 @@ def main() -> int:
                 depth=0,
                 ancestor_failure_signatures=(),
             )
-            metrics.note_final_cues(translated_cues)
+            translated_cues = _finalize_translated_cues(block.cues, translated_cues, config, metrics)
             replay_surface = _replay_surface_info(entry, metrics.style_retry_trace)
             record = {
                 "schema_version": "translated_eval_record_v2",
                 "id": entry["id"],
                 "lecture": entry["lecture"],
                 "source_file": entry["source_file"],
+                "source_kind": entry.get("source_kind"),
+                "semantic_checks": entry.get("semantic_checks", []),
                 "source_review": _input_review(entry),
                 "replay_meta": entry.get("replay_meta"),
                 "replay_trace": entry.get("replay_trace"),
@@ -406,6 +402,8 @@ def main() -> int:
                     "cue_indices": [cue.index for cue in block.cues],
                     "source_cues": _serialize_cues(block.cues),
                     "source_text": _translated_text(block.cues),
+                    "previous_source_sentences": list(block.previous_source_sentences),
+                    "next_source_sentences": list(block.next_source_sentences),
                     "block_lint": {
                         "low_confidence": block.low_confidence,
                         "lint_reasons": block.lint_reasons,
@@ -426,6 +424,7 @@ def main() -> int:
                     "repair_rejected": metrics.repair_rejected > 0,
                     "smaller_block_fallback": metrics.smaller_block_fallbacks > 0,
                     "single_cue_source_fallback": metrics.single_cue_source_fallbacks > 0,
+                    "source_fallback_cues": metrics.source_fallback_cues,
                     "post_wrap_failure": metrics.post_wrap_failure_blocks > 0,
                     "failure_reasons": metrics.failure_reasons,
                     "pre_wrap_failures": metrics.pre_wrap_failures,

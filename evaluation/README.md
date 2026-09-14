@@ -73,6 +73,47 @@ python3 run_review_eval.py --input evaluation/cs231n_sp25_eval_review_round1.jso
 
 Use frozen-block mode when the variable under test is prompt/profile/model behavior rather than block-boundary changes.
 
+Frozen replay reads `source_cues`, cue order, timestamps, lint and surrounding context
+from the JSONL snapshot only; it does not require the original SRT file. New outputs
+persist both context lists. Legacy snapshots without context use empty lists, so do
+not compare them as context-equivalent to historical runs that reconstructed context
+from a live SRT. Missing, empty or inconsistent cue snapshots fail validation.
+
+Batch preparation uses the same snapshot loader, glossary selection, style selector,
+strict-retry profile/mode selection and final English-term normalization as synchronous
+replay. Phase2 and recursive splitting remain intentionally outside the Batch lane.
+New manifests persist the actual strict profile/mode and non-secret runtime settings;
+later stages restore those settings. Explicit CLI model/profile/temperature overrides
+are recorded separately in `strict_provenance`. Never infer a missing strict profile
+from the continuation-tail shape: legacy unrecorded profiles stay unknown and require
+fresh requests for a profile-specific comparison. Old recorded results are not rewritten.
+
+## External-domain smoke check
+
+`external_domain_smoke.jsonl` contains four short, source-linked public excerpts from
+NASA, USGS, NPS and the US Forest Service, outside the CS231n tuning corpus. The cue
+boundaries and timings are synthetic. Semantic expectations are stored for review,
+not passed to the translation model. This is a small out-of-domain smoke test, not
+evidence of general performance on real subtitle timing or unseen lectures.
+
+Run a bounded live replay (uses your API key and incurs API charges):
+
+```bash
+SRT_TRANSLATION_CONTEXT='General science narration.' SRT_TRANSLATION_STYLE='' \
+SRT_ALLOWED_ENGLISH_TERMS='' SRT_APPROVED_ENGLISH_TERMS_PATH='' \
+SRT_ENGLISH_FALLBACK_MAP_PATH='' SRT_GLOSSARY_LOG_PATH='' \
+SRT_REQUEST_MAX_ATTEMPTS=1 SRT_PHASE1_MAX_RETRIES=1 SRT_PHASE2_MAX_REPAIRS=1 \
+SRT_MAX_SPLIT_DEPTH=0 SRT_REQUEST_TIMEOUT=30 \
+python run_review_eval.py --input evaluation/external_domain_smoke.jsonl \
+  --output translation_artifacts/external_domain_smoke_result.jsonl \
+  --frozen-blocks --model gpt-4.1-mini --repair-model gpt-4o \
+  --phase1-temperature 0 --repair-temperature 0
+```
+
+Check source/output cue identity and timestamps, final gates, source fallback counts,
+and every semantic expectation. Keep automated gate success separate from the manual
+meaning review; any remaining failure is a failed check, not a successful translation.
+
 Two replay lanes are useful and should be kept separate:
 
 - `style-only`: `--frozen-blocks --disable-repair --phase1-temperature 0.0`
