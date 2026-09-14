@@ -14,6 +14,10 @@ import time
 from pathlib import Path
 from typing import List
 
+import requests
+
+from subtitle_translator.http import retryable_response
+
 from subtitle_translator import (
     TranslationMetrics,
     append_metrics_log,
@@ -28,9 +32,8 @@ from subtitle_translator import (
 
 
 def find_files(root: Path, pattern: str, recursive: bool) -> List[Path]:
-    if recursive:
-        return sorted(root.rglob(pattern))
-    return sorted(root.glob(pattern))
+    paths = root.rglob(pattern) if recursive else root.glob(pattern)
+    return sorted(path for path in paths if path.is_file() and not path.name.lower().endswith(".ko.srt"))
 
 
 def process_file(path: Path, translator, glossary_store, config) -> tuple[Path, TranslationMetrics]:
@@ -56,7 +59,7 @@ def process_file(path: Path, translator, glossary_store, config) -> tuple[Path, 
     return out_path, metrics
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="Batch English→Korean SRT translator (folder)")
     ap.add_argument("folder", help="Folder containing .srt files")
     ap.add_argument("--pattern", default="*.srt", help="Glob pattern for input files (default: *.srt)")
@@ -104,7 +107,7 @@ def main():
     files = find_files(root, args.pattern, args.recursive)
     if not files:
         print("No files matched.")
-        return
+        return 0
 
     config = load_runtime_config(glossary_log_path=args.glossary_log_path)
     model = args.model or config.phase1_model
@@ -149,6 +152,12 @@ def main():
                 print("Interrupted by user. Exiting...")
                 raise
             except Exception as e:
+                if (
+                    isinstance(e, requests.HTTPError)
+                    and e.response is not None
+                    and not retryable_response(e.response)
+                ):
+                    raise  # File retries cannot fix authentication, quota or request configuration.
                 if attempt < args.retries:
                     wait = min(5 * attempt, 20)
                     print(f"[{i}/{total}] WARN  : {f.name} (attempt {attempt}/{args.retries}) -> {e}")
@@ -165,7 +174,8 @@ def main():
     print(f"  Skipped   : {skip}")
     print(f"  Translated: {done - skip}")
     print(f"  Failed    : {failed}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

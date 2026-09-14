@@ -89,24 +89,8 @@ def _effective_strict_prompt_profile(row: dict[str, Any]) -> str | None:
     if trace.get("effective_strict_prompt_profile"):
         return str(trace["effective_strict_prompt_profile"])
 
-    provenance = row.get("provenance") or {}
-    base_profile = str(provenance.get("prompt_profile") or "fragment_preserving_v2")
-    offending = trace.get("offending_cue_indices") or []
-    protected = trace.get("protected_cue_indices") or []
-    spans = trace.get("offending_spans") or []
-    if (
-        base_profile == "fragment_preserving_v2"
-        and len(offending) == 1
-        and protected
-        and spans
-        and all(
-            span.get("preferred_action") == "restore_missing_tail"
-            and span.get("source_tail_type") == "continuation_tail"
-            for span in spans
-        )
-    ):
-        return "fragment_preserving_v3"
-    return provenance.get("prompt_profile")
+    recorded = signals.get("effective_strict_prompt_profile") or trace.get("prompt_profile")
+    return str(recorded) if recorded else None
 
 
 def _matches(

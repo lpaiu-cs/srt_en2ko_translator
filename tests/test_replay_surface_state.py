@@ -166,6 +166,7 @@ class ReplaySurfaceStateTests(unittest.TestCase):
                 "style_retry_rejection_stage": "strict_retry_selector",
                 "style_retry_rejection_subtype": "local_meaning_not_restored",
                 "style_retry_trace": {
+                    "effective_strict_prompt_profile": "fragment_preserving_v3",
                     "offending_cue_indices": [2],
                     "protected_cue_indices": [1],
                     "offending_spans": [
@@ -222,7 +223,7 @@ class ReplaySurfaceStateTests(unittest.TestCase):
         signature = _signature_row(row, "dummy.jsonl")
         self.assertEqual(signature["effective_strict_prompt_profile"], "fragment_preserving_v3")
 
-    def test_effective_strict_prompt_profile_backfills_continuation_v3(self) -> None:
+    def test_effective_strict_prompt_profile_does_not_infer_from_tail_shape(self) -> None:
         row = {
             "provenance": {"prompt_profile": "fragment_preserving_v2"},
             "pipeline_signals": {
@@ -238,7 +239,7 @@ class ReplaySurfaceStateTests(unittest.TestCase):
                 }
             },
         }
-        self.assertEqual(_effective_strict_prompt_profile(row), "fragment_preserving_v3")
+        self.assertIsNone(_effective_strict_prompt_profile(row))
 
     def test_pipeline_signal_can_surface_effective_strict_prompt_profile(self) -> None:
         signals = {

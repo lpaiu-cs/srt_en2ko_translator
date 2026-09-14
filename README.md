@@ -13,11 +13,12 @@
 ## 🚀 시작하기
 
 ### 1. 설치 및 준비
-Python 환경이 필요합니다. (가상 환경 사용을 권장합니다.)
+Python 3.10 이상이 필요합니다. (CI 검증: 3.10, 3.12, 3.14)
 
 ```bash
-# 필수 패키지 설치
-python3 -m pip install requests
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
 ### 2. 환경 변수 설정
@@ -43,6 +44,16 @@ python srt_en2ko_translator.py input.srt -o output.ko.srt
 폴더 내의 모든 SRT 파일을 한 번에 번역합니다. 강의 영상이나 시리즈물 번역 시 용어의 일관성을 유지하는 데 유리합니다.
 ```bash
 python batch_translate_srt.py ./eng_subtitles_folder --skip-existing --recursive
+```
+
+생성된 `*.ko.srt`는 입력에서 제외합니다. 파일 실패 시 종료 코드 `1`을 반환하며,
+인증·잔액 소진·요청 설정 오류는 즉시 중단합니다. 원문 폴백이 남은 번역은 완료 파일로 저장하지 않습니다.
+`--skip-existing`은 파일 존재 여부만 확인하므로, 이전 버전이 만든 불완전한 결과는 직접 검토해야 합니다.
+
+### 테스트
+API 키나 외부 API 호출 없이 실행합니다.
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ## 🛠 더 알아보기 (개발자용 문서)
