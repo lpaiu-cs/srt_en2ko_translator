@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from .http import retryable_response
+
 
 class OpenAIBatchClient:
     def __init__(
@@ -45,7 +47,7 @@ class OpenAIBatchClient:
                 for handle, position in upload_positions:
                     handle.seek(position)
                 response = self.session.request(method, url, timeout=self.timeout, **kwargs)
-                if response.status_code in {429, 500, 502, 503, 504}:
+                if retryable_response(response):
                     retry_after = response.headers.get("retry-after")
                     base_delay = min(
                         self.backoff_max_seconds,

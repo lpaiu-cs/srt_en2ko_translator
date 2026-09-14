@@ -10,6 +10,7 @@ import re
 import requests
 
 from .config import RuntimeConfig
+from .http import retryable_response
 from .models import EmittedCue, PhaseTranslationResult, RepairRequest, TranslationRequest
 from .splitting import ts_to_ms
 from .text import compact_spaces, normalize_text
@@ -1831,7 +1832,7 @@ class OpenAIChatTranslator(BaseTranslator):
                     json=data,
                     timeout=self.config.request_timeout,
                 )
-                if response.status_code in {429, 500, 502, 503, 504}:
+                if retryable_response(response):
                     retry_after = response.headers.get("retry-after")
                     base_delay = min(
                         self.config.request_backoff_max_seconds,

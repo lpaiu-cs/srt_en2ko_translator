@@ -16,6 +16,8 @@ from typing import List
 
 import requests
 
+from subtitle_translator.http import retryable_response
+
 from subtitle_translator import (
     TranslationMetrics,
     append_metrics_log,
@@ -153,10 +155,9 @@ def main() -> int:
                 if (
                     isinstance(e, requests.HTTPError)
                     and e.response is not None
-                    and 400 <= e.response.status_code < 500
-                    and e.response.status_code not in {408, 429}
+                    and not retryable_response(e.response)
                 ):
-                    raise  # A file retry cannot fix authentication or request configuration.
+                    raise  # File retries cannot fix authentication, quota or request configuration.
                 if attempt < args.retries:
                     wait = min(5 * attempt, 20)
                     print(f"[{i}/{total}] WARN  : {f.name} (attempt {attempt}/{args.retries}) -> {e}")

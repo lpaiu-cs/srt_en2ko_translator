@@ -17,7 +17,7 @@ import run_review_eval_batch as batch_eval
 from subtitle_translator.config import load_runtime_config
 from subtitle_translator.glossary import GlossaryStore
 from subtitle_translator.metrics import TranslationMetrics
-from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, TranslationBlock
+from subtitle_translator.models import Cue, EmittedCue, PhaseTranslationResult, TranslationBlock, TranslationRequest
 from subtitle_translator.openai_batch import OpenAIBatchClient
 from subtitle_translator.pipeline import (
     _run_phase1_style_retry, _run_phase1_with_retry, _run_phase2_repair,
@@ -143,6 +143,26 @@ class ReliabilityTests(unittest.TestCase):
                 with patch.object(client.session, "request", side_effect=request), patch("subtitle_translator.openai_batch.time.sleep"):
                     client.upload_batch_file(path)
                 self.assertEqual(bodies, [True, True])
+
+    def test_quota_exhaustion_is_terminal_but_rate_limits_are_retried(self):
+        exhausted = self.response(429, {"error": {"type": "insufficient_quota", "code": "credit_balance_exhausted"}})
+        translator = OpenAIChatTranslator(self.config)
+        request = TranslationRequest(TranslationBlock([Cue(1, "00:00:00,000", "00:00:03,000", "Hello.")]))
+        with patch.object(translator.session, "post", return_value=exhausted) as post:
+            with self.assertRaises(requests.HTTPError):
+                translator.translate_block(request)
+            self.assertEqual(post.call_count, 1)
+        client = OpenAIBatchClient("synthetic")
+        with patch.object(client.session, "request", return_value=exhausted) as get:
+            with self.assertRaises(requests.HTTPError):
+                client.retrieve_batch("synthetic")
+            self.assertEqual(get.call_count, 1)
+        with self.assertRaises(requests.HTTPError):
+            self.run_folder(requests.HTTPError("quota", response=exhausted))
+        valid = {"choices": [{"message": {"content": json.dumps({"emitted_cues": [{"cue_index": 1, "text": "안녕하세요."}], "risk_flags": []})}}]}
+        with patch.object(translator.session, "post", side_effect=[self.response(429), self.response(200, valid)]) as post, patch("subtitle_translator.translators.time.sleep"):
+            translator.translate_block(request)
+            self.assertEqual(post.call_count, 2)
 
     def entry(self, detector_miss=False):
         texts = (["like model is that it can be trained with just associations", "of images and text."]
