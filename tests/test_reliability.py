@@ -210,12 +210,48 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn("ResNet", row["translation_output"]["translated_cues"][0]["text"])
         self.assertNotIn(self.config.openai_api_key, output.read_text())
 
+    def test_frozen_context_setting_controls_sync_and_batch_request_bodies(self):
+        entry = self.entry()
+        block = sync_eval._hydrate_frozen_block(entry)
+        previous = [EmittedCue(cue.index, "번역된 문장입니다.") for cue in block.cues]
+        for enabled in (False, True):
+            self.config.use_context_window = enabled
+            translator = OpenAIChatTranslator(self.config)
+            for mode in ("initial", "full_block", "offending_cue_only"):
+                with self.subTest(enabled=enabled, mode=mode):
+                    request = TranslationRequest(
+                        block=block,
+                        strict_style_retry=mode != "initial",
+                        strict_retry_mode="full_block" if mode == "initial" else mode,
+                        previous_emitted_cues=previous,
+                        protected_cue_indices=[240],
+                        offending_cue_indices=[241],
+                    )
+                    response_cues = previous[-1:] if mode == "offending_cue_only" else previous
+                    response_key = "offending_cue_rewrites" if mode == "offending_cue_only" else "emitted_cues"
+                    content = {response_key: [{"cue_index": cue.cue_index, "text": cue.text} for cue in response_cues], "risk_flags": []}
+                    response = self.response(200, {"choices": [{"message": {"content": json.dumps(content)}}]})
+                    batch_body = translator.build_phase1_request_body(request)
+                    with patch.object(translator.session, "post", return_value=response) as post:
+                        translator.translate_block(request)
+                    self.assertEqual(post.call_args.kwargs["json"], batch_body)
+                    payload = json.loads(batch_body["messages"][-1]["content"])
+                    self.assertEqual(payload["left_context"], entry["previous_source_sentences"] if enabled else [])
+                    self.assertEqual(payload["right_context"], entry["next_source_sentences"] if enabled else [])
+                    self.assertEqual(block.previous_source_sentences, entry["previous_source_sentences"])
+                    self.assertEqual(block.next_source_sentences, entry["next_source_sentences"])
+
+    def test_batch_disabled_context_matches_manifest(self):
+        self.config.use_context_window = False
+        self.check_batch_roundtrip(False)
+
     def test_batch_request_profile_matches_recorded_profile_and_mode(self):
         for detector_miss in (False, True):
             with self.subTest(detector_miss=detector_miss):
                 self.check_batch_roundtrip(detector_miss)
 
     def check_batch_roundtrip(self, detector_miss):
+        context_enabled = self.config.use_context_window
         entry = self.entry(detector_miss)
         source = self.write_rows("source.jsonl", [entry])
         paths = {key: str(self.root / (key + ".jsonl")) for key in ("requests", "manifest", "retry_requests", "retry_manifest", "final")}
@@ -225,6 +261,13 @@ class ReliabilityTests(unittest.TestCase):
         manifest_text = Path(paths["manifest"]).read_text()
         self.assertNotIn(self.config.openai_api_key, manifest_text)
         manifest = json.loads(manifest_text)
+        self.assertEqual(manifest["provenance"]["runtime_config"]["use_context_window"], context_enabled)
+        self.assertEqual(manifest["current_block"]["previous_source_sentences"], entry["previous_source_sentences"])
+        self.assertEqual(manifest["current_block"]["next_source_sentences"], entry["next_source_sentences"])
+        request_body = json.loads(Path(paths["requests"]).read_text())["body"]
+        payload = json.loads(request_body["messages"][-1]["content"])
+        self.assertEqual(payload["left_context"], entry["previous_source_sentences"] if context_enabled else [])
+        self.assertEqual(payload["right_context"], entry["next_source_sentences"] if context_enabled else [])
         translated = (["이 모델의 장점은 단지 연관성만으로도 학습할 수 있다는 점입니다.", "이미지와 텍스트의."]
                       if detector_miss else ["이상적으로는 CLIP 모델을 바로", "바로 사용할 수 있으면 좋겠죠."])
         phase1 = {"emitted_cues": [dict(cue_index=240 + i, text=text) for i, text in enumerate(translated)], "risk_flags": []}
@@ -243,6 +286,10 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(profiles, ["fragment_preserving_v3"])
         self.assertEqual(retry["effective_strict_prompt_profile"], profiles[0])
         self.assertEqual(retry["strict_retry_mode"], "offending_cue_only" if detector_miss else "full_block")
+        retry_body = json.loads(Path(paths["retry_requests"]).read_text())["body"]
+        retry_payload = json.loads(retry_body["messages"][-1]["content"])
+        self.assertEqual(retry_payload["left_context"], entry["previous_source_sentences"] if context_enabled else [])
+        self.assertEqual(retry_payload["right_context"], entry["next_source_sentences"] if context_enabled else [])
         strict = ({"offending_cue_rewrites": [{"cue_index": 241, "text": "이미지와 텍스트의 연관성으로요."}], "risk_flags": []}
                   if detector_miss else phase1)
         strict_output = self.write_rows("strict_output.jsonl", [{"custom_id": retry["strict_custom_id"], "response": {

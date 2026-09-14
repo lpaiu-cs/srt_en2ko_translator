@@ -78,6 +78,8 @@ from the JSONL snapshot only; it does not require the original SRT file. New out
 persist both context lists. Legacy snapshots without context use empty lists, so do
 not compare them as context-equivalent to historical runs that reconstructed context
 from a live SRT. Missing, empty or inconsistent cue snapshots fail validation.
+`SRT_USE_CONTEXT_WINDOW=false` keeps the stored snapshot intact but sends empty
+left/right context in initial and strict-retry requests, in both synchronous and Batch lanes.
 
 Batch preparation uses the same snapshot loader, glossary selection, style selector,
 strict-retry profile/mode selection and final English-term normalization as synchronous

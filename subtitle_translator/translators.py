@@ -1639,8 +1639,8 @@ class OpenAIChatTranslator(BaseTranslator):
                 }
                 for idx, cue in enumerate(cues)
             ],
-            "left_context": block.previous_source_sentences,
-            "right_context": block.next_source_sentences,
+            "left_context": block.previous_source_sentences if self.config.use_context_window else [],
+            "right_context": block.next_source_sentences if self.config.use_context_window else [],
             "glossary_terms": [
                 {"source": term.source, "target": term.target, "note": term.note, "mode": term.mode}
                 for term in request.glossary_terms
